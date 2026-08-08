@@ -1,19 +1,24 @@
 # TradePilot AI — /runs endpoints: create a run, list runs, fetch one
-# run's full audit trail, and record a human's review decision.
+# run's full audit trail, run the analysis pipeline, and record a
+# human's review decision.
 #
-# In plain terms: this is where a run's lifecycle starts, and (as of
-# Milestone 10) where it can end. Creating a run ONLY writes a database
-# record — it does not capture a chart, fetch market data, call the AI
-# agent, score anything, or check any guardrails. Those tools exist as
-# standalone modules but aren't wired into an orchestrator yet, so
-# nothing here pretends a run has gone through the pipeline just because
-# it exists. The review endpoint below is equally narrow: it records a
+# In plain terms: this is where a run's lifecycle starts, runs, and (as
+# of Milestone 10) ends. Creating a run ONLY writes a database record --
+# it does not capture a chart, fetch market data, call the AI agent,
+# score anything, or check any guardrails. That's what
+# POST /runs/{run_id}/analyze is for (Milestone 10.5): it delegates the
+# entire pipeline to backend/orchestrator.py and persists every step's
+# result. This route file itself contains none of that logic -- it just
+# calls the orchestrator and turns its result (or its refusal) into an
+# HTTP response, the same thin-router pattern every other endpoint here
+# follows. The review endpoint below is equally narrow: it records a
 # human's judgment about results that already exist -- it never
 # re-scores, re-evaluates, or re-runs anything.
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
+from backend.orchestrator import RunAlreadyAnalyzedError, run_pipeline
 from backend.schemas import (
     HumanReviewRequest,
     HumanReviewResponse,
@@ -28,6 +33,21 @@ from database.database import get_session
 from guardrails.rules import GuardrailOutcome, outcome_from_results
 
 router = APIRouter(prefix="/runs", tags=["runs"])
+
+
+def _run_to_detail(run) -> RunDetail:
+    """
+    Builds the RunDetail response for a Run ORM object: the run plus its
+    full audit trail, plus the derived guardrail_outcome. Shared by
+    GET /runs/{run_id} and POST /runs/{run_id}/analyze so both compute
+    "the outcome" the identical way -- from outcome_from_results() over
+    whatever GuardrailResult rows actually exist, never a stored column.
+    """
+    detail = RunDetail.model_validate(run)
+    outcome = outcome_from_results(
+        (result.guardrail_name, result.passed) for result in run.guardrail_results
+    )
+    return detail.model_copy(update={"guardrail_outcome": outcome.value if outcome else None})
 
 
 @router.post("", response_model=RunCreateResponse, status_code=201)
@@ -74,11 +94,29 @@ def get_run(run_id: str, session: Session = Depends(get_session)) -> RunDetail:
     if run is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
-    detail = RunDetail.model_validate(run)
-    outcome = outcome_from_results(
-        (result.guardrail_name, result.passed) for result in run.guardrail_results
-    )
-    return detail.model_copy(update={"guardrail_outcome": outcome.value if outcome else None})
+    return _run_to_detail(run)
+
+
+@router.post("/{run_id}/analyze", response_model=RunDetail)
+def analyze_run(run_id: str, session: Session = Depends(get_session)) -> RunDetail:
+    """
+    Runs the full capture -> market data -> agent -> evaluation ->
+    guardrails pipeline for this run (Milestone 10.5) and persists every
+    step. Synchronous -- by the time this returns, the pipeline has
+    already finished, so the response already reflects the final
+    guardrail outcome. A run can only be analyzed once: a second attempt
+    is refused with 409, the same way a second human decision is.
+    """
+    run = crud.get_run(session, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+    try:
+        updated_run = run_pipeline(session, run_id)
+    except RunAlreadyAnalyzedError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    return _run_to_detail(updated_run)
 
 
 @router.post("/{run_id}/review", response_model=HumanReviewResponse)

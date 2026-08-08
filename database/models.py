@@ -45,10 +45,15 @@ class Run(Base):
     stop: Mapped[float | None] = mapped_column(Float, nullable=True)
     target: Mapped[float | None] = mapped_column(Float, nullable=True)
     # Values in actual use: "CREATED" (backend/api/routes_runs.py, on
-    # creation), "APPROVED" / "REJECTED" (backend/api/routes_runs.py's
-    # review endpoint, Milestone 10, after a human decision). This column
-    # just stores whatever string it's given -- validation of what's
-    # allowed lives at the API boundary (backend/schemas.py), not here.
+    # creation); "ANALYZING", then "BLOCKED" / "REQUIRES_REVIEW" /
+    # "READY_FOR_REVIEW" (backend/orchestrator.py, Milestone 10.5, as the
+    # pipeline runs and finishes -- the same three values
+    # GuardrailOutcome can be, never "APPROVED"); "APPROVED" / "REJECTED"
+    # (backend/api/routes_runs.py's review endpoint, Milestone 10, after a
+    # human decision -- the only two values a human review can set). This
+    # column just stores whatever string it's given -- validation of
+    # what's allowed lives at the API boundary (backend/schemas.py) and in
+    # backend/orchestrator.py, not here.
     status: Mapped[str] = mapped_column(String(30), default="pending")
     created_at: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
     completed_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)

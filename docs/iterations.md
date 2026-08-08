@@ -795,6 +795,156 @@ Not wired into the frontend (Milestone 11). All 173 tests pass (19
 database + 25 API + 17 capture + 19 market data + 25 agent + 32
 evaluation + 36 guardrails).
 
+## Milestone 10.5 — orchestrator wires the 12-step pipeline
+
+Built `backend/orchestrator.py`'s `run_pipeline(session, run_id)`: the
+first code path anywhere in this application that actually calls capture
+-> market data -> agent -> evaluation -> guardrails in sequence for one
+run and persists every step. Added as its own milestone, between 10 and
+11, deliberately -- not folded into the UI milestone -- so a pipeline bug
+and a rendering bug can never be mistaken for each other, and so the
+orchestrator (which the whole project is really about) gets its own
+tests, its own commit, and its own entry here.
+
+**Scope, exactly as agreed before writing any code:**
+
+- One new endpoint, `POST /runs/{run_id}/analyze`. `POST /runs` is
+  untouched -- still just a database write.
+- Synchronous. No background jobs, no websockets, no polling
+  infrastructure -- the endpoint doesn't return until the whole pipeline
+  has finished, and the response already reflects the final state. The
+  UI (Milestone 11) will call this, then read `GET /runs/{id}`.
+- No new business logic. Every number, every category, every guardrail
+  rule comes from the same five already-tested modules
+  (`capture/`, `tools/market_data.py`, `agents/trade_agent.py`,
+  `evals/trade_evaluator.py`, `guardrails/rules.py`) -- none of them were
+  changed. The orchestrator only calls them, in the order
+  `docs/architecture.md` already specifies, and saves what they return
+  via `database/crud.py`.
+- LIVE/DEMO selection stays exactly as it was -- `CaptureManager()` and
+  `MarketDataManager()` are constructed with no arguments, so they read
+  `CAPTURE_MODE`/`MARKET_DATA_MODE` from `.env` themselves, same as
+  always. No new fallback logic anywhere.
+
+**Fail fast, honestly:**
+
+- Chart capture and market data are independent tool calls -- neither
+  depends on the other succeeding (they're separate inputs to the agent
+  step) -- so both are always attempted, even if one already failed.
+- The agent is only called if **both** capture and market data succeeded.
+  A failed capture or a failed quote means there's nothing real to show
+  the agent, so it's never invoked at all -- not even to have it
+  short-circuit itself the way `agents/trade_agent.py` already can.
+  Verified directly: a mocked `TradeAgent.analyze` is asserted never
+  called when either upstream stage fails.
+- The evaluator is only called if the agent succeeded -- there's nothing
+  to score otherwise.
+- **Guardrails always run**, no matter what failed upstream, using
+  whatever result objects exist (even synthetic FAILED ones for a stage
+  that was skipped) -- so a `BLOCKED` run still gets its full eleven-rule
+  breakdown explaining exactly why, not a truncated one.
+
+**A run can only be analyzed once.** `run_pipeline()` checks for any
+existing `Capture`/`MarketData`/`AgentAnalysis`/`Evaluation`/
+`GuardrailResult` rows before doing anything, and raises
+`RunAlreadyAnalyzedError` if any exist -- turned into a `409` by the
+route, the same "a decision is final" rule Milestone 10's human-review
+endpoint already applies to a second approve/reject attempt.
+
+**Every stage writes a start and finish audit event**, in order, whether
+it succeeded, failed, or was skipped (`analysis_started`,
+`capture_started`/`capture_finished`, `market_data_started`/
+`market_data_finished`, `agent_analysis_started`/`agent_analysis_finished`
+or `agent_analysis_skipped`, `evaluation_started`/`evaluation_finished`
+or `evaluation_skipped`, `guardrails_started`/`guardrails_finished`,
+`analysis_finished`) -- confirmed exact-order by a dedicated test, for
+both a fully successful run and one where capture fails partway through.
+
+**The run's `status` moves with the pipeline**, then lands on the
+guardrail outcome itself: `"ANALYZING"` while it runs, then `"BLOCKED"` /
+`"REQUIRES_REVIEW"` / `"READY_FOR_REVIEW"` when it finishes --
+`completed_at` is set to that same moment. **Never `"APPROVED"` or
+`"REJECTED"`** -- those two values are still only ever written by the
+human-review endpoint (Milestone 10). If a human later reviews the run,
+that endpoint overwrites both `status` and `completed_at` with the
+decision and its timestamp, same as it always has -- the orchestrator
+doesn't need to know or care that will happen later.
+
+**A known, deliberate limitation, not fixed here because it was out of
+this milestone's approved scope (schema changes to `agent_analyses` or
+`evaluations`):** those two tables were built in Milestone 3 with no
+`status`/`error_message` columns, and their score columns are `NOT NULL`
+-- so a *failed* agent analysis or a *failed* evaluation cannot be stored
+as a structured row under the current schema (unlike `Capture` and
+`MarketData`, which both had `status`+`error_message` from the start).
+The orchestrator works around this rather than silently dropping the
+failure: when the agent or evaluator fails, no row is written to that
+table, but the real error message is written to `audit_events` instead,
+so `GET /runs/{id}` still tells the whole story -- just through the audit
+trail rather than a dedicated failed row. The same applies to the five
+categorical fields the agent produces (`trend_direction`, `trend_quality`,
+`structure_quality`, `setup_quality`, `context_risk`) -- `agent_analyses`
+was never given columns for these either (a gap from the Milestone 8
+revision, not this one), so a **successful** analysis's audit event
+records them in its message text, which is currently the only place
+they're visible after the fact. Both gaps are flagged here for whoever
+scopes a future milestone -- adding the missing columns is a small,
+independent change, not attempted now since it wasn't part of what was
+agreed for this one.
+
+- `backend/orchestrator.py` — `run_pipeline()`, `RunAlreadyAnalyzedError`,
+  and small private helpers (`_has_existing_pipeline_results`,
+  `_skipped_agent_result`, `_skipped_evaluation_result`, and four
+  `_..._summary()` functions that build the audit-event text). Previously
+  a one-line placeholder since Milestone 2.
+- `backend/api/routes_runs.py` — added `POST /runs/{run_id}/analyze`
+  (404 if the run doesn't exist, 409 via `RunAlreadyAnalyzedError` if it's
+  already been analyzed, otherwise runs the pipeline and returns the same
+  `RunDetail` shape `GET /runs/{id}` returns). Factored the
+  outcome-attaching logic both endpoints need into `_run_to_detail()`
+  rather than duplicating it a second time.
+- `database/models.py` — `Run.status`'s comment updated to list the new
+  values the orchestrator writes (doc-only change, no schema change).
+- `tests/test_orchestrator.py` — 10 tests, all against the real DEMO
+  capture and market-data providers (no network -- committed fixtures,
+  same pattern as Milestone 9's fix tests) with `CAPTURE_MODE`/
+  `MARKET_DATA_MODE` pinned to `DEMO` via `monkeypatch` so behavior never
+  depends on a developer's local `.env`. Only the agent is ever mocked
+  (`backend.orchestrator.TradeAgent` patched directly -- no anthropic
+  client is ever constructed, no network call is ever made): a full DEMO
+  run reaching `REQUIRES_REVIEW` with `SYNTHETIC_DATA` the only failing
+  rule; every stage's result readable via `GET /runs/{id}` (including the
+  exact total score matching `docs/rubric.md`'s worked example); a failed
+  capture (mocked `CaptureManager`) stopping the pipeline, never calling
+  the agent, and still writing all eleven guardrail results; a failed
+  market-data fetch (mocked `MarketDataManager`) doing the same; a failed
+  agent analysis being recorded via the audit trail and never evaluated;
+  audit-event ordering for both a fully successful run and a
+  capture-fails run; analyzing an already-analyzed run refused with 409
+  and the original results unchanged; analyzing a nonexistent run
+  returning 404; and a direct check that `GuardrailOutcome` has exactly
+  three values, `run.status` after analysis is always one of them, and
+  `human_review` stays `None` until an actual human decision is made.
+
+Manually verified against a real running server (not just the test
+client): created a run, analyzed it -- which, with a real
+`ANTHROPIC_API_KEY` configured locally, made one real Claude call against
+the real DEMO screenshot and real DEMO market quote -- and reached
+`REQUIRES_REVIEW` for two genuine reasons (`SCORE_THRESHOLD`, the real
+analysis scored 45; and `SYNTHETIC_DATA`, unconditionally, since the
+whole run is DEMO-sourced). Confirmed `GET /runs/{id}` showed the
+complete audit trail in order, all eleven guardrail results, the real
+agent prose, and the real component scores. Rejected the run; confirmed
+a second `/analyze` call was refused with `409`, and a second `/review`
+call was refused with `409` and the original `REJECTED` decision
+unchanged. Dev database reset to empty afterward, same as every prior
+milestone's manual-verification step.
+
+Not wired into the frontend -- that's Milestone 11, which was
+deliberately paused so this could be its own milestone first. All 183
+tests pass (19 database + 25 API + 17 capture + 19 market data + 25 agent
++ 32 evaluation + 36 guardrails + 10 orchestrator).
+
 ## Rebuilding the database
 
 `init_db()` only ever adds tables that don't exist yet — it never alters
@@ -827,5 +977,6 @@ isn't forgotten.
 8. ~~Evaluation~~
 9. ~~Guardrails~~
 10. ~~Human approval~~
+10.5. ~~Orchestrator~~
 11. UI (incl. Tailwind migration)
 12. Testing
