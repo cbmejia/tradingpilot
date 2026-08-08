@@ -1,20 +1,31 @@
 # TradePilot AI — the trading agent: wraps the Claude call.
 #
 # In plain terms: this takes a chart screenshot and a market data quote,
-# shows both to Claude, and turns Claude's reply into a structured,
-# qualitative analysis (trend/structure/setup/uncertainty, all in words).
+# shows both to Claude, and turns Claude's reply into a structured
+# analysis -- free-form prose for a human to read, PLUS a small set of
+# enumerated categories (e.g. is the trend UP/DOWN/SIDEWAYS) that the
+# evaluation engine actually scores from. Neither is ever a number.
 #
-# THE HARD BOUNDARY: the agent produces WORDS, never numbers that could
-# function as a score. It never outputs a total score, a component score,
-# a percentage confidence, or a 0-100 rating -- the evaluation engine
-# (Milestone 8) computes every number itself, from these qualitative
-# fields, in plain deterministic Python. If Claude's response contains
-# anything numeric where a score could hide -- an extra numeric field, a
-# non-text value in a text field, a non-LOW/MEDIUM/HIGH value in
-# uncertainty -- this rejects the ENTIRE response as FAILED rather than
-# trying to salvage the "clean" parts. A model that ignored this
-# instruction once can't be trusted to have followed it correctly
-# elsewhere in the same response.
+# THE HARD BOUNDARY: the agent produces WORDS -- prose or a fixed-set
+# category label -- never numbers that could function as a score. It
+# never outputs a total score, a component score, a percentage
+# confidence, or a 0-100 rating -- the evaluation engine (Milestone 8)
+# computes every number itself, from these qualitative fields, in plain
+# deterministic Python. If Claude's response contains anything numeric
+# where a score could hide -- an extra numeric field, a non-text value in
+# a text field -- or any category value outside its documented allowed
+# set, this rejects the ENTIRE response as FAILED rather than trying to
+# salvage the "clean" parts or coercing a bad value to something valid. A
+# model that ignored these rules once can't be trusted to have followed
+# the others correctly in the same response.
+#
+# v2 note (post-Milestone-8 revision): the five category fields
+# (trend_direction, trend_quality, structure_quality, setup_quality,
+# context_risk) were added because the original rubric scored the four
+# subjective components from prose length and keyword matching -- which
+# scores verbosity, not setup quality. The prose fields
+# (analysis_text/trend_assessment/structure_assessment/setup_assessment)
+# stay for the human reviewer to read; they no longer drive any score.
 
 from __future__ import annotations
 
@@ -43,14 +54,28 @@ ANALYSIS_PROMPT_PATH = PROMPTS_DIR / "analysis_prompt.md"
 DEFAULT_TIMEOUT_SECONDS = 60.0  # hard cap on the Claude API call -- no infinite wait
 DEFAULT_MAX_TOKENS = 1024
 
-EXPECTED_FIELDS = {
+TEXT_FIELDS = (
     "analysis_text",
     "trend_assessment",
     "structure_assessment",
     "setup_assessment",
-    "uncertainty",
-}
+)
 ALLOWED_UNCERTAINTY = {"LOW", "MEDIUM", "HIGH"}
+
+# The categorical fields the evaluation engine actually scores from (see
+# evals/trade_evaluator.py). Each maps to its own fixed, small allowed
+# set -- UNCLEAR is always one of the options, on purpose, so the agent
+# always has a way to say "I can't tell" for that specific category
+# rather than guessing.
+CATEGORICAL_FIELDS = {
+    "trend_direction": {"UP", "DOWN", "SIDEWAYS", "UNCLEAR"},
+    "trend_quality": {"STRONG", "MODERATE", "WEAK", "UNCLEAR"},
+    "structure_quality": {"CLEAN", "MIXED", "CHOPPY", "UNCLEAR"},
+    "setup_quality": {"TEXTBOOK", "ACCEPTABLE", "MARGINAL", "NONE", "UNCLEAR"},
+    "context_risk": {"LOW", "MODERATE", "ELEVATED", "UNCLEAR"},
+}
+
+EXPECTED_FIELDS = set(TEXT_FIELDS) | {"uncertainty"} | set(CATEGORICAL_FIELDS)
 
 
 class AgentAnalysisStatus(str, Enum):
@@ -73,11 +98,18 @@ class AgentAnalysisResult:
     """
     What every analysis attempt returns, success or failure alike.
 
-    Every field here is qualitative text except status, timestamp, and
-    error_message -- there is deliberately no numeric score field on this
-    dataclass at all. timestamp is set only on success, and is the real
-    moment this analysis was produced (right after Claude responded), not
-    a placeholder or a later database-write time.
+    Every field here is qualitative -- text or a fixed-set category word
+    -- except status, timestamp, and error_message. There is deliberately
+    no numeric score field on this dataclass at all. timestamp is set
+    only on success, and is the real moment this analysis was produced
+    (right after Claude responded), not a placeholder or a later
+    database-write time.
+
+    analysis_text/trend_assessment/structure_assessment/setup_assessment
+    are free-form prose for a human reviewer to read -- they do not drive
+    any score. trend_direction/trend_quality/structure_quality/
+    setup_quality/context_risk are the fixed-category fields the
+    evaluation engine (evals/trade_evaluator.py) actually scores from.
     """
 
     status: AgentAnalysisStatus
@@ -86,6 +118,11 @@ class AgentAnalysisResult:
     structure_assessment: Optional[str]
     setup_assessment: Optional[str]
     uncertainty: Optional[str]  # "LOW" | "MEDIUM" | "HIGH"
+    trend_direction: Optional[str]  # "UP" | "DOWN" | "SIDEWAYS" | "UNCLEAR"
+    trend_quality: Optional[str]  # "STRONG" | "MODERATE" | "WEAK" | "UNCLEAR"
+    structure_quality: Optional[str]  # "CLEAN" | "MIXED" | "CHOPPY" | "UNCLEAR"
+    setup_quality: Optional[str]  # "TEXTBOOK" | "ACCEPTABLE" | "MARGINAL" | "NONE" | "UNCLEAR"
+    context_risk: Optional[str]  # "LOW" | "MODERATE" | "ELEVATED" | "UNCLEAR"
     timestamp: Optional[datetime]
     error_message: Optional[str] = None
 
@@ -179,7 +216,7 @@ def _parse_response(raw_text: str) -> dict:
         )
 
     text_fields: dict[str, str] = {}
-    for key in ("analysis_text", "trend_assessment", "structure_assessment", "setup_assessment"):
+    for key in TEXT_FIELDS:
         value = data[key]
         if not isinstance(value, str):
             raise ValueError(f"'{key}' must be text, got {type(value).__name__}")
@@ -197,7 +234,22 @@ def _parse_response(raw_text: str) -> dict:
             f"'uncertainty' must be one of {sorted(ALLOWED_UNCERTAINTY)}, got {uncertainty_raw!r}"
         )
 
-    return {**text_fields, "uncertainty": uncertainty}
+    # The category fields the evaluation engine scores from. A value
+    # outside the documented allowed set is rejected outright -- never
+    # coerced to something valid (e.g. an unrecognized word is NOT
+    # silently mapped to UNCLEAR; that would be guessing on the model's
+    # behalf, which is exactly what this project avoids everywhere else).
+    categorical_fields: dict[str, str] = {}
+    for key, allowed_values in CATEGORICAL_FIELDS.items():
+        value = data[key]
+        if not isinstance(value, str):
+            raise ValueError(f"'{key}' must be text, got {type(value).__name__}")
+        normalized = value.strip().upper()
+        if normalized not in allowed_values:
+            raise ValueError(f"'{key}' must be one of {sorted(allowed_values)}, got {value!r}")
+        categorical_fields[key] = normalized
+
+    return {**text_fields, "uncertainty": uncertainty, **categorical_fields}
 
 
 class TradeAgent:
@@ -312,6 +364,11 @@ class TradeAgent:
             structure_assessment=parsed["structure_assessment"],
             setup_assessment=parsed["setup_assessment"],
             uncertainty=parsed["uncertainty"],
+            trend_direction=parsed["trend_direction"],
+            trend_quality=parsed["trend_quality"],
+            structure_quality=parsed["structure_quality"],
+            setup_quality=parsed["setup_quality"],
+            context_risk=parsed["context_risk"],
             timestamp=datetime.now(timezone.utc),
             error_message=None,
         )
@@ -324,6 +381,11 @@ class TradeAgent:
             structure_assessment=None,
             setup_assessment=None,
             uncertainty=None,
+            trend_direction=None,
+            trend_quality=None,
+            structure_quality=None,
+            setup_quality=None,
+            context_risk=None,
             timestamp=None,
             error_message=message,
         )

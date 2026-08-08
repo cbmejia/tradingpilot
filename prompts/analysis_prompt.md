@@ -21,7 +21,7 @@ what the chart shows.
 
 ## What to do
 
-Look at the chart image. Describe:
+Look at the chart image. Describe, in your own words:
 
 - **Trend** — what direction is price moving in, on this timeframe?
 - **Structure** — what does the price structure look like (e.g. higher
@@ -32,6 +32,26 @@ Look at the chart image. Describe:
   unclear, ambiguous, or you are not confident in your own read. Do not
   default to LOW to sound more useful.
 
+Then, separately, classify what you just described into these fixed
+categories. These categories — not your prose above — are what the
+scoring engine actually reads, so pick the option that genuinely matches
+what you see, and use UNCLEAR whenever you're not sure rather than
+guessing to fill in something else:
+
+- **trend_direction** — one of: `UP`, `DOWN`, `SIDEWAYS`, `UNCLEAR`
+- **trend_quality** — how strong is that trend? One of: `STRONG`,
+  `MODERATE`, `WEAK`, `UNCLEAR`
+- **structure_quality** — one of: `CLEAN` (clear, orderly structure),
+  `MIXED` (some structure but with overlap/noise), `CHOPPY` (no real
+  structure, back-and-forth), `UNCLEAR`
+- **setup_quality** — one of: `TEXTBOOK` (a clean, well-formed setup),
+  `ACCEPTABLE` (a reasonable but imperfect setup), `MARGINAL` (barely
+  there, weak), `NONE` (no setup visible at all), `UNCLEAR`
+- **context_risk** — how risky is the broader context right now (e.g.
+  choppy/erratic price action, price sitting right at a major level, or
+  anything else that makes this a worse moment to be looking at a setup)?
+  One of: `LOW`, `MODERATE`, `ELEVATED`, `UNCLEAR`
+
 Respond with **only** this JSON object — no other text, no markdown code
 fence, no trailing commentary:
 
@@ -40,10 +60,17 @@ fence, no trailing commentary:
   "trend_assessment": "...",
   "structure_assessment": "...",
   "setup_assessment": "...",
-  "uncertainty": "LOW" | "MEDIUM" | "HIGH"
+  "uncertainty": "LOW" | "MEDIUM" | "HIGH",
+  "trend_direction": "UP" | "DOWN" | "SIDEWAYS" | "UNCLEAR",
+  "trend_quality": "STRONG" | "MODERATE" | "WEAK" | "UNCLEAR",
+  "structure_quality": "CLEAN" | "MIXED" | "CHOPPY" | "UNCLEAR",
+  "setup_quality": "TEXTBOOK" | "ACCEPTABLE" | "MARGINAL" | "NONE" | "UNCLEAR",
+  "context_risk": "LOW" | "MODERATE" | "ELEVATED" | "UNCLEAR"
 }}
 
 Do not include a score, a rating, a percentage, or any other number that
 represents confidence or quality — that is computed separately, by code,
-never by you. Do not recommend placing a trade or phrase anything as an
-instruction to buy or sell — describe only what is observable.
+never by you. Every category field must be exactly one of its listed
+options — never a number, never a word outside that list. Do not
+recommend placing a trade or phrase anything as an instruction to buy or
+sell — describe only what is observable.

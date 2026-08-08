@@ -160,22 +160,32 @@ guardrails simultaneously, while still looking legitimate.
 
 `agents/trade_agent.py`'s `TradeAgent.analyze(capture_result,
 market_data_result, trade_params)` sends the screenshot and market data
-snapshot to Claude and returns an `AgentAnalysisResult` — a fixed shape
-of qualitative fields (`analysis_text`, `trend_assessment`,
-`structure_assessment`, `setup_assessment`, `uncertainty`), a `status`
-(`SUCCESS`/`FAILED`), a timezone-aware UTC `timestamp`, and
-`error_message`.
+snapshot to Claude and returns an `AgentAnalysisResult` — a `status`
+(`SUCCESS`/`FAILED`), a timezone-aware UTC `timestamp`, `error_message`,
+free-form prose (`analysis_text`, `trend_assessment`,
+`structure_assessment`, `setup_assessment`, for a human reviewer to
+read), an overall `uncertainty` (`LOW`/`MEDIUM`/`HIGH`), and five
+fixed-category fields — `trend_direction`, `trend_quality`,
+`structure_quality`, `setup_quality`, `context_risk` — each one word
+from a small, closed, documented set (always including `UNCLEAR`). The
+category fields are what `evals/trade_evaluator.py` actually scores from
+— added in a Milestone 8 revision after the original prose-only rubric
+turned out to reward verbosity over setup quality (see
+`docs/rubric.md`).
 
-**The hard boundary:** the agent produces words, never numbers that
-could function as a score. `_parse_response()` requires Claude's reply
-to match the expected JSON shape exactly — every text field must
-actually be text, `uncertainty` must be one of `LOW`/`MEDIUM`/`HIGH`,
-and any extra field carrying a number is treated as an attempted score.
-Any violation rejects the *entire* response as `FAILED` rather than
-stripping the bad part and keeping the rest — a model response that
-broke this rule once isn't trusted to have followed the others
-correctly. All scoring is Milestone 8's `evals/trade_evaluator.py`, in
-plain deterministic Python, computed from these qualitative fields.
+**The hard boundary:** the agent produces words — prose or a category
+label — never numbers that could function as a score. `_parse_response()`
+requires Claude's reply to match the expected JSON shape exactly: every
+prose field must actually be text, `uncertainty` must be one of
+`LOW`/`MEDIUM`/`HIGH`, every category field must be one of its own
+documented allowed values (never coerced if it isn't — an unrecognized
+category word fails the response, it is not mapped to `UNCLEAR` on the
+agent's behalf), and any extra field carrying a number is treated as an
+attempted score. Any violation rejects the *entire* response as `FAILED`
+rather than stripping the bad part and keeping the rest — a model
+response that broke one rule isn't trusted to have followed the others
+correctly. All scoring is `evals/trade_evaluator.py`, in plain
+deterministic Python, computed from the category fields only.
 
 Before any API call, `analyze()` checks both inputs are actually
 `SUCCESS` — a failed capture or a failed market-data fetch returns a
@@ -199,12 +209,16 @@ component scores and the same total. The full rubric — exactly what each
 component reads and what earns 20 vs. 10 vs. 0 — is written out in
 [docs/rubric.md](rubric.md); the short version:
 
-- **Trend, Structure, Entry, Timing/Context** each read one qualitative
-  field from the agent's analysis (`trend_assessment`,
-  `structure_assessment`, `setup_assessment`, `analysis_text`
-  respectively) and score it 0/10/20 by the same rule: substantive text
-  scores 20, thin text scores 10, empty or explicitly "can't tell" text
-  scores 0.
+- **Trend, Structure, Entry, Timing/Context** each read one or two of
+  the agent's fixed-category fields (`trend_direction`+`trend_quality`,
+  `structure_quality`, `setup_quality`, `context_risk` respectively) —
+  words chosen from a small closed set, never prose. (Revised from an
+  earlier version that scored these from prose length and keyword
+  matching, which measured verbosity, not setup quality — see
+  `docs/rubric.md`'s "What v1 got wrong.") The agent's prose fields
+  (`analysis_text`, `trend_assessment`, `structure_assessment`,
+  `setup_assessment`) still exist for a human reviewer to read; nothing
+  in the evaluator reads them.
 - **Risk/Reward** is computed arithmetically from the user's
   entry/stop/target — it never reads the agent's words at all. Missing
   or incoherent trade parameters (stop on the wrong side, zero risk

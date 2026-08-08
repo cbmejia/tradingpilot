@@ -463,6 +463,82 @@ of scope here — this engine scores, it doesn't block; that's Milestone 9.
 All 111 tests pass (19 database + 11 API + 17 capture + 18 market data +
 20 agent + 26 evaluation).
 
+## Milestone 8 revision — category-based rubric replaces the length heuristic
+
+**What v1 got wrong.** Four of the five components (Trend, Structure,
+Entry, Timing/Context) scored the agent's *prose*: substantive text
+(≥15 characters, no "can't tell" phrasing) scored 20, thin text scored
+10, empty or negative-phrase text scored 0. That measures verbosity, not
+setup quality — a mediocre setup described fluently scored exactly the
+same as a genuinely good one described just as fluently. Only
+Risk/Reward was ever genuinely scored, because it's real arithmetic; the
+other 80 of 100 possible points were, in effect, measuring how much the
+model chose to write. Milestone 9's guardrail thresholds would have been
+gating on nothing meaningful.
+
+**The fix, spanning both Milestone 7 and Milestone 8 together:**
+
+- **`agents/trade_agent.py`** — the agent now emits five additional
+  fixed-category fields alongside its existing prose (which stays,
+  unchanged, for a human reviewer to read — it just stops driving any
+  score): `trend_direction` (`UP`/`DOWN`/`SIDEWAYS`/`UNCLEAR`),
+  `trend_quality` (`STRONG`/`MODERATE`/`WEAK`/`UNCLEAR`),
+  `structure_quality` (`CLEAN`/`MIXED`/`CHOPPY`/`UNCLEAR`),
+  `setup_quality` (`TEXTBOOK`/`ACCEPTABLE`/`MARGINAL`/`NONE`/`UNCLEAR`),
+  `context_risk` (`LOW`/`MODERATE`/`ELEVATED`/`UNCLEAR`). Every field's
+  allowed set includes `UNCLEAR`, and both prompts now explicitly tell
+  the model to use it rather than guess. `_parse_response()` validates
+  each category field is a string and a member of its own allowed set —
+  an unrecognized value (or a number) rejects the whole response as
+  `FAILED`; it is never coerced to `UNCLEAR` or anything else on the
+  model's behalf. `EXPECTED_FIELDS` grew from 5 to 10 JSON keys.
+- **`evals/trade_evaluator.py`** — rewritten to score Trend, Structure,
+  Entry, and Timing/Context purely from these category fields via fixed
+  lookup tables (`TREND_QUALITY_SCORES`, `STRUCTURE_QUALITY_SCORES`,
+  `SETUP_QUALITY_SCORES`, `CONTEXT_RISK_SCORES`) — never from string
+  length, never from keyword matching on prose. `_score_subjective_text`,
+  `NEGATIVE_PHRASES`, and `MIN_SUBSTANTIVE_LENGTH` are gone entirely,
+  replaced by `_score_trend()` (reads `trend_direction` +
+  `trend_quality` together — direction gates whether there's a trend to
+  credit at all; SIDEWAYS or either field UNCLEAR scores 0) and
+  `_score_from_map()` (the shared lookup for the other three, single-
+  field components). `context_risk`'s mapping is deliberately inverted
+  from the others — LOW risk scores highest, ELEVATED scores 0 — since
+  it's the one field where the "best" word describes safety, not
+  quality. Everything else is untouched: determinism, integer-only
+  scores, uncertainty caps (LOW 20 / MEDIUM 14 / HIGH 8) applied
+  per-component before summing, Risk/Reward's exemption from the cap,
+  `total_score` always the sum of the five components, and the
+  100/76/52 ceilings — all verified unchanged by the existing v1 tests,
+  which still pass without modification to their assertions.
+- **`docs/rubric.md`** — rewritten with the full category-to-points
+  table per component, a corrected worked example, and a new "What v1
+  got wrong" section explaining the flaw and the fix for anyone reading
+  the rubric later without this conversation's context.
+- **Tests** — `tests/test_agent.py` gained 5 tests (out-of-set
+  `trend_direction`/`setup_quality` rejected, a missing categorical
+  field rejected, a numeric categorical field rejected, case
+  normalization to uppercase) plus updated its existing well-formed and
+  HIGH-uncertainty fixtures to include valid category values (25 total,
+  up from 20). `tests/test_evaluation.py` gained 9 tests — most
+  importantly `test_prose_length_does_not_affect_score_when_categories_
+  match`, which runs the *same* categories through one analysis with
+  one-word prose and another with multi-sentence prose and asserts
+  identical scores on every component — plus a band test per category
+  field, an all-`UNCLEAR` test confirming every component scores 0, and
+  an out-of-set-value defense-in-depth test at the evaluator level (32
+  total, up from 26).
+
+Re-ran the exact Milestone 8 worked example (MEDIUM uncertainty, LONG
+setup, RR = 2.0, all "best" categories) by hand: total is still 76 — the
+same number as before the revision, because that example's categories
+happen to correspond to what its old prose implied. The difference is
+now structural: that 76 is earned by `STRONG`/`CLEAN`/`ACCEPTABLE`/`LOW`,
+not by paragraph length.
+
+All 122 tests pass (19 database + 11 API + 17 capture + 18 market data +
+25 agent + 32 evaluation).
+
 ## Rebuilding the database
 
 `init_db()` only ever adds tables that don't exist yet — it never alters

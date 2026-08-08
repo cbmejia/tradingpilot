@@ -71,6 +71,11 @@ WELL_FORMED_RESPONSE = json.dumps(
         "structure_assessment": "higher highs and higher lows",
         "setup_assessment": "pullback toward the trendline, not yet confirmed",
         "uncertainty": "MEDIUM",
+        "trend_direction": "UP",
+        "trend_quality": "STRONG",
+        "structure_quality": "CLEAN",
+        "setup_quality": "ACCEPTABLE",
+        "context_risk": "LOW",
     }
 )
 
@@ -132,6 +137,11 @@ def test_well_formed_response_maps_into_analysis_fields():
     assert "pullback" in result.setup_assessment
     assert result.uncertainty == "MEDIUM"
     assert "grinding higher" in result.analysis_text
+    assert result.trend_direction == "UP"
+    assert result.trend_quality == "STRONG"
+    assert result.structure_quality == "CLEAN"
+    assert result.setup_quality == "ACCEPTABLE"
+    assert result.context_risk == "LOW"
 
 
 def test_response_wrapped_in_markdown_fence_is_still_parsed():
@@ -162,6 +172,11 @@ def test_high_uncertainty_is_accepted_as_a_valid_honest_answer():
             "structure_assessment": "insufficient information",
             "setup_assessment": "no readable setup",
             "uncertainty": "HIGH",
+            "trend_direction": "UNCLEAR",
+            "trend_quality": "UNCLEAR",
+            "structure_quality": "UNCLEAR",
+            "setup_quality": "UNCLEAR",
+            "context_risk": "UNCLEAR",
         }
     )
     client = _fake_client(response)
@@ -170,6 +185,8 @@ def test_high_uncertainty_is_accepted_as_a_valid_honest_answer():
 
     assert result.status == AgentAnalysisStatus.SUCCESS
     assert result.uncertainty == "HIGH"
+    assert result.trend_direction == "UNCLEAR"
+    assert result.setup_quality == "UNCLEAR"
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +278,67 @@ def test_response_with_invalid_uncertainty_word_returns_failed():
     result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
 
     assert result.status == AgentAnalysisStatus.FAILED
+
+
+# ---------------------------------------------------------------------------
+# Categorical fields (v2 rubric) -- fixed allowed sets, never coerced
+# ---------------------------------------------------------------------------
+
+
+def test_out_of_set_trend_direction_returns_failed_not_coerced():
+    payload = json.loads(WELL_FORMED_RESPONSE)
+    payload["trend_direction"] = "NORTH"  # not in the allowed set
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert result.trend_direction is None
+    assert "trend_direction" in result.error_message
+
+
+def test_out_of_set_setup_quality_returns_failed():
+    payload = json.loads(WELL_FORMED_RESPONSE)
+    payload["setup_quality"] = "GREAT"  # not in the allowed set
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert result.setup_quality is None
+
+
+def test_missing_categorical_field_returns_failed():
+    payload = json.loads(WELL_FORMED_RESPONSE)
+    del payload["context_risk"]
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert "context_risk" in result.error_message
+
+
+def test_numeric_categorical_field_returns_failed():
+    payload = json.loads(WELL_FORMED_RESPONSE)
+    payload["trend_quality"] = 20  # a number, not a category word
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert result.trend_quality is None
+
+
+def test_categorical_field_is_normalized_to_uppercase():
+    payload = json.loads(WELL_FORMED_RESPONSE)
+    payload["structure_quality"] = "clean"  # lowercase
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.SUCCESS
+    assert result.structure_quality == "CLEAN"
 
 
 # ---------------------------------------------------------------------------

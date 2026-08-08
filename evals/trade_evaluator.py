@@ -2,23 +2,34 @@
 # deterministic rubric score.
 #
 # In plain terms: this is the ONLY place in the whole app that produces a
-# number representing how good a setup looks. It reads the agent's words
-# (never a number from the agent — there isn't one) and the user's trade
-# parameters, and computes five component scores (0-100 total, 20 points
-# each) using fixed, explicit, written-down rules. Nothing here calls an
-# AI. Nothing here is random. Given the same inputs, this always produces
-# the same output -- that's what makes a score in this app auditable.
+# number representing how good a setup looks. It reads the agent's fixed
+# CATEGORY fields (never its prose, never a number from the agent -- there
+# isn't one) and the user's trade parameters, and computes five component
+# scores (0-100 total, 20 points each) using fixed, explicit, written-down
+# rules. Nothing here calls an AI. Nothing here is random. Given the same
+# inputs, this always produces the same output -- that's what makes a
+# score in this app auditable.
+#
+# v2 note (this is a revision of the original Milestone 8 rubric): v1
+# scored four of the five components from the agent's PROSE -- substantive
+# text (>=15 chars, no "can't tell" phrases) scored 20. That rewarded
+# verbosity, not setup quality: a poor setup described fluently scored
+# full marks. v2 scores those same four components from the agent's
+# ENUMERATED category fields instead (trend_direction/trend_quality/
+# structure_quality/setup_quality/context_risk) -- fixed words from a
+# small allowed set, never string length, never keyword matching on
+# prose. The prose fields still exist on AgentAnalysisResult, for the
+# human reviewer to read; nothing in this file reads them anymore.
 #
 # THE RUBRIC, in one paragraph: four components (Trend, Structure, Entry,
-# Timing/Context) each read one qualitative field from the agent's
-# analysis and score it 0, 10, or 20 based on whether the text is
-# substantive, thin, or explicitly says "can't tell." The fifth
-# component, Risk/Reward, is computed ARITHMETICALLY from the user's
-# entry/stop/target -- it never reads the agent's words at all. The
-# agent's uncertainty (LOW/MEDIUM/HIGH) then caps each of the four
-# subjective components (not Risk/Reward) at 20/14/8 respectively, and
-# total_score is always the sum of the five (already-capped) components
-# -- the same formula the database's CHECK constraint enforces.
+# Timing/Context) each read one or two of the agent's category fields and
+# score them via a fixed lookup table -- see docs/rubric.md for the exact
+# table. The fifth component, Risk/Reward, is computed ARITHMETICALLY
+# from the user's entry/stop/target -- it never reads anything the agent
+# said. The agent's uncertainty (LOW/MEDIUM/HIGH) then caps each of the
+# four subjective components (not Risk/Reward) at 20/14/8 respectively,
+# and total_score is always the sum of the five (already-capped)
+# components -- the same formula the database's CHECK constraint enforces.
 
 from __future__ import annotations
 
@@ -30,33 +41,20 @@ from agents.trade_agent import AgentAnalysisResult, AgentAnalysisStatus, TradePa
 
 # --- Rubric constants -- change these here, and update docs/rubric.md too ---
 
-MIN_SUBSTANTIVE_LENGTH = 15  # characters; below this, a non-empty field is "thin"
-
-# If a qualitative field contains any of these (case-insensitive), the
-# agent is explicitly saying it couldn't read/determine something, so
-# that component scores 0 regardless of length.
-NEGATIVE_PHRASES = (
-    "no clear",
-    "not clear",
-    "no readable",
-    "not readable",
-    "no obvious",
-    "insufficient information",
-    "insufficient",
-    "cannot determine",
-    "can't determine",
-    "no discernible",
-    "not discernible",
-    "unclear",
-    "ambiguous",
-    "no setup",
-    "not confident",
-    "hard to tell",
-    "unable to",
-)
-
 RR_STRONG_THRESHOLD = 2.0  # reward is at least double the risk
 RR_MARGINAL_THRESHOLD = 1.0  # reward at least equals risk
+
+# Trend combines two category fields: direction is a gate (no real trend
+# if SIDEWAYS or UNCLEAR), quality sets the score within a real trend.
+TREND_QUALITY_SCORES = {"STRONG": 20, "MODERATE": 10, "WEAK": 0}
+
+STRUCTURE_QUALITY_SCORES = {"CLEAN": 20, "MIXED": 10, "CHOPPY": 0}
+
+SETUP_QUALITY_SCORES = {"TEXTBOOK": 20, "ACCEPTABLE": 15, "MARGINAL": 5, "NONE": 0}
+
+# context_risk is inverted from the others: LOW risk is favorable (scores
+# high), ELEVATED risk is unfavorable (scores low).
+CONTEXT_RISK_SCORES = {"LOW": 20, "MODERATE": 10, "ELEVATED": 0}
 
 # Uncertainty caps applied to the four SUBJECTIVE components only, after
 # each is scored and before they're summed. LOW's cap of 20 is a no-op
@@ -103,34 +101,49 @@ class EvaluationResult:
     error_message: Optional[str] = None
 
 
-def _score_subjective_text(text: Optional[str]) -> int:
+def _score_trend(trend_direction: Optional[str], trend_quality: Optional[str]) -> int:
     """
-    Deterministic 3-band score for one qualitative field. Used for Trend
-    (trend_assessment), Structure (structure_assessment), Entry
-    (setup_assessment), and Timing/Context (analysis_text) -- the same
-    rule, applied to four different fields.
+    Trend is the one component read from two category fields together:
+    direction gates whether there's a trend worth scoring at all, quality
+    sets the score within it.
 
-    - 0  if the field is empty, or contains a phrase from NEGATIVE_PHRASES
-         (the agent explicitly said it couldn't read/determine something).
-    - 10 if the field has content but is shorter than
-         MIN_SUBSTANTIVE_LENGTH characters (present, but thin).
-    - 20 if the field is at least MIN_SUBSTANTIVE_LENGTH characters and
-         contains none of NEGATIVE_PHRASES.
+    - SIDEWAYS direction, or either field UNCLEAR -> 0 (no directional
+      trend to credit, or the agent couldn't tell).
+    - UP or DOWN direction -> STRONG=20, MODERATE=10, WEAK=0.
     """
-    if text is None:
+    if trend_direction is None or trend_quality is None:
+        raise ValueError("trend_direction and trend_quality are both required")
+
+    direction = trend_direction.strip().upper()
+    quality = trend_quality.strip().upper()
+
+    if direction not in ("UP", "DOWN", "SIDEWAYS", "UNCLEAR"):
+        raise ValueError(f"unrecognized trend_direction: {trend_direction!r}")
+    if quality not in ("STRONG", "MODERATE", "WEAK", "UNCLEAR"):
+        raise ValueError(f"unrecognized trend_quality: {trend_quality!r}")
+
+    if direction in ("SIDEWAYS", "UNCLEAR") or quality == "UNCLEAR":
         return 0
 
-    normalized = text.strip().lower()
-    if not normalized:
+    return TREND_QUALITY_SCORES[quality]
+
+
+def _score_from_map(value: Optional[str], score_map: dict, field_name: str) -> int:
+    """
+    Shared lookup for the three single-field categorical components
+    (Structure/Entry/Timing-Context). UNCLEAR always scores 0. Any value
+    outside score_map (and not UNCLEAR) is a hard error, not a guess.
+    """
+    if value is None:
+        raise ValueError(f"{field_name} is required")
+
+    normalized = value.strip().upper()
+    if normalized == "UNCLEAR":
         return 0
+    if normalized not in score_map:
+        raise ValueError(f"unrecognized {field_name}: {value!r}")
 
-    if any(phrase in normalized for phrase in NEGATIVE_PHRASES):
-        return 0
-
-    if len(text.strip()) < MIN_SUBSTANTIVE_LENGTH:
-        return 10
-
-    return 20
+    return score_map[normalized]
 
 
 def _score_risk_reward(rr_ratio: float) -> int:
@@ -239,12 +252,26 @@ def evaluate(
     if rr_error is not None:
         return _failed(f"Cannot compute risk/reward: {rr_error}")
 
+    try:
+        trend_score_raw = _score_trend(agent_analysis.trend_direction, agent_analysis.trend_quality)
+        structure_score_raw = _score_from_map(
+            agent_analysis.structure_quality, STRUCTURE_QUALITY_SCORES, "structure_quality"
+        )
+        entry_score_raw = _score_from_map(
+            agent_analysis.setup_quality, SETUP_QUALITY_SCORES, "setup_quality"
+        )
+        timing_context_score_raw = _score_from_map(
+            agent_analysis.context_risk, CONTEXT_RISK_SCORES, "context_risk"
+        )
+    except ValueError as exc:
+        return _failed(f"Cannot score agent analysis: {exc}")
+
     cap = UNCERTAINTY_CAPS[agent_analysis.uncertainty]
 
-    trend_score = min(_score_subjective_text(agent_analysis.trend_assessment), cap)
-    structure_score = min(_score_subjective_text(agent_analysis.structure_assessment), cap)
-    entry_score = min(_score_subjective_text(agent_analysis.setup_assessment), cap)
-    timing_context_score = min(_score_subjective_text(agent_analysis.analysis_text), cap)
+    trend_score = min(trend_score_raw, cap)
+    structure_score = min(structure_score_raw, cap)
+    entry_score = min(entry_score_raw, cap)
+    timing_context_score = min(timing_context_score_raw, cap)
 
     # Risk/Reward is EXEMPT from the uncertainty cap -- it's a fact about
     # the numbers, not a reading of the chart, so the agent's uncertainty
