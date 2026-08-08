@@ -20,7 +20,8 @@ what's next.
 - `frontend/` — React + TypeScript UI (Tailwind added when the UI milestone lands)
 - `backend/` — FastAPI app: routes, orchestrator, request/response schemas
 - `agents/` — the trading agent (wraps the Claude call) and its prompt logic
-- `tools/` — chart capture (Playwright, live/demo), market data, economic calendar
+- `capture/` — chart capture tool: `CaptureProvider` interface, `DemoProvider` (offline fixtures), `LiveProvider` (Playwright), `CaptureManager` (picks one, never falls back)
+- `tools/` — market data, economic calendar (chart capture lives in `capture/` — see above)
 - `evals/` — deterministic rubric scoring of the agent's analysis
 - `guardrails/` — hard safety rules (RR, freshness, validity, confidence) the agent may never bypass
 - `database/` — SQLAlchemy models and persistence for the full audit trail
@@ -44,7 +45,34 @@ Open **http://127.0.0.1:8000/docs** for interactive API docs (Swagger UI) —
 you can create and fetch runs directly from the browser. Run `pytest` from
 the repo root to run the test suite.
 
+## Trying the chart capture tool by hand
+
+DEMO mode needs nothing beyond the steps above and never touches the
+network:
+
+```bash
+python -c "from capture import CaptureManager; r = CaptureManager(mode='demo').capture('EURUSD', '1h'); print(r)"
+```
+
+The image it points to is already committed at
+`screenshots/demo/EURUSD_1h.png` — open it directly to see it.
+
+LIVE mode additionally needs Playwright's browser binary (a real
+download, not run automatically by this project):
+
+```bash
+playwright install chromium
+python -c "from capture import CaptureManager; r = CaptureManager(mode='live').capture('EURUSD', '1h'); print(r)"
+```
+
+A successful LIVE capture is saved to `screenshots/live/` with a filename
+like `EURUSD_1h_20260101T120000Z.png` (that folder is gitignored — LIVE
+captures are local-only, never committed). Read TradingView's terms of
+service before using LIVE mode: it's meant for your own manual,
+low-volume use, not automated bulk capture — see
+[docs/architecture.md](docs/architecture.md).
+
 ## Status
 
-Milestone 4 of 12: backend API and run lifecycle. See
+Milestone 5 of 12: chart capture tool (LIVE and DEMO providers). See
 [docs/iterations.md](docs/iterations.md).

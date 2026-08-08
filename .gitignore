@@ -37,10 +37,11 @@ pnpm-debug.log*
 .eslintcache
 
 # --- Screenshots ---
+# LIVE captures are throwaway/local -- never committed. DEMO fixtures are
+# committed on purpose: the demo capture path needs them to work on a
+# fresh clone with no network access.
 screenshots/live/*
-screenshots/demo/*
 !screenshots/live/.gitkeep
-!screenshots/demo/.gitkeep
 
 # --- Logs ---
 logs/*

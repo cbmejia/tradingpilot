@@ -161,6 +161,69 @@ instructions match a clean clone.
 All 30 tests pass (19 database + 11 API). No frontend changes, no
 orchestrator logic, no human-review endpoint (that's Milestone 10).
 
+## Milestone 5 — Chart capture tool (LIVE and DEMO providers)
+
+Built the chart capture tool in `capture/` (a deliberate deviation from
+the original `tools/tradingview_capture.py` location — that file now
+just points here; `docs/architecture.md` updated to match). DEMO mode was
+built first and completely before any Playwright code was written, per
+the instruction.
+
+- `capture/base.py` — `CaptureProvider` (the interface), `CaptureResult`
+  (`mode`, `symbol`, `timeframe`, `screenshot_path`, `captured_at`,
+  `status`, `error_message`), `CaptureMode`/`CaptureStatus` enums, and
+  `sanitize_component()` (rejects path-traversal attempts in a
+  symbol/timeframe before it ever touches the filesystem).
+- `capture/demo_provider.py` — `DemoProvider`. Reads a real file from
+  `screenshots/demo/`, matched deterministically by symbol + timeframe
+  (`SYMBOL_timeframe.png`). No network access. Fails clearly — never
+  substitutes another pair's chart — if the exact fixture doesn't exist.
+- `screenshots/demo/EURUSD_1h.png` and `screenshots/demo/GBPUSD_4h.png` —
+  two committed fixture images so DEMO mode works on a fresh clone with
+  no network access. Generated as plain labeled placeholder charts (a
+  simple abstract bar series, gridlines, and a large "SAMPLE IMAGE — NOT
+  REAL MARKET DATA" banner baked into the image itself) rather than
+  anything styled to resemble a real TradingView screenshot, so they can
+  never be mistaken for genuine market data.
+- `capture/live_provider.py` — `LiveProvider`. Drives headless Chromium
+  via Playwright, navigates to a TradingView chart URL, waits a fixed 2
+  seconds for it to render (not an infinite wait), and screenshots to
+  `screenshots/live/` with a symbol+timeframe+UTC-timestamp filename. Any
+  failure (missing browser binary, timeout, page error) returns a
+  `FAILED` result with the real error — there is no code path here that
+  calls `DemoProvider`. Uses no TradingView credentials (public chart
+  viewing doesn't require login); `TRADINGVIEW_USERNAME`/`PASSWORD`
+  remain available as unused placeholders in `.env.example` for later if
+  a login flow ever becomes necessary.
+- `capture/manager.py` — `CaptureManager`. Reads `CAPTURE_MODE`, picks
+  exactly one provider, always uses that same one. Also verifies every
+  result's `mode` actually matches the mode it's running in and raises
+  `RuntimeError` if not — a structural backstop against a provider bug
+  ever mislabeling a capture's true source.
+- `.gitignore` fixed: it was ignoring `screenshots/demo/*` too (a bug from
+  Milestone 1) — demo fixtures need to be committed, so only
+  `screenshots/live/*` is ignored now.
+- `tests/test_capture.py` — 13 tests, none touching the network: demo
+  success/determinism/timezone-aware timestamp, demo failure on an
+  unknown symbol (and on a path-traversal attempt), a manager-level fake
+  LIVE failure proving no demo substitution occurs, a mismatched-mode
+  provider proving the manager's backstop raises, and two `LiveProvider`
+  tests that mock `playwright.sync_api.sync_playwright` itself so a real
+  failure path is exercised with zero network activity.
+
+Manually verified from the terminal (see README for the exact commands):
+a real demo capture returns a `SUCCESS`/`DEMO` result pointing at the
+committed fixture; a real LIVE attempt (browser binaries deliberately not
+installed) fails cleanly with Playwright's own "run `playwright install`"
+error, mode stays `LIVE`, status is `FAILED`, and no network call is made
+(the browser can't even launch without its binary, so it never reaches
+`page.goto()`).
+
+Not wired into the orchestrator, the agent, or the frontend, and no
+capture API endpoint was added — this tool is standalone and callable on
+its own, exactly as instructed. All 43 tests pass (19 database + 11 API +
+13 capture).
+
 ## Rebuilding the database
 
 `init_db()` only ever adds tables that don't exist yet — it never alters
@@ -187,7 +250,7 @@ isn't forgotten.
 2. ~~Folder structure~~
 3. ~~Database schema~~
 4. ~~Backend API~~
-5. Screenshot tool
+5. ~~Screenshot tool~~
 6. Market-data tool
 7. Agent loop
 8. Evaluation
