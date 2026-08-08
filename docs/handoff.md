@@ -8,14 +8,14 @@ the root [README.md](../README.md).
 
 ## 1. Current state
 
-- **Milestones 1–10.5 are complete**, including both Milestone 10.5
-  follow-up fixes (failure states on analysis/evaluation records, then
-  persisting the agent's categorical observations). Milestone 11 (UI,
-  including the Tailwind migration) is next. Milestone 12 (testing) is
-  after that.
-- **Latest commit:** "Milestone 10.5 fix 2 - persist agent categorical
-  observations".
-- **Test count:** 192 tests, all passing (28 database + 25 API + 17
+- **Milestones 1–10.5 are complete**, including all three Milestone
+  10.5 follow-up fixes (failure states on analysis/evaluation records;
+  persisting the agent's categorical observations; storing market-data
+  mode and the risk/reward ratio). Milestone 11 (UI, including the
+  Tailwind migration) is next. Milestone 12 (testing) is after that.
+- **Latest commit:** "Milestone 10.5 fix 3 - store market data mode and
+  risk reward ratio".
+- **Test count:** 197 tests, all passing (33 database + 25 API + 17
   capture + 19 market data + 25 agent + 32 evaluation + 36 guardrails +
   10 orchestrator). See the roadmap checklist at the bottom of
   [docs/iterations.md](iterations.md) for the full milestone list.
@@ -41,15 +41,18 @@ the root [README.md](../README.md).
   before writing) — see the "Milestone 10.5 fix" and "Milestone 10.5 fix
   2" entries in [docs/iterations.md](iterations.md) for the full
   reasoning on both this and the status/error_message fix.
-- **A schema audit across all eight tables was done as part of fix 2** —
-  two gaps were found and reported, neither fixed yet: `market_data` has
-  no `mode` (LIVE/DEMO) column of its own (only inferable indirectly via
-  `source`), and `evaluations` has no `risk_reward_ratio` column (the raw
-  ratio behind `risk_reward_score`, documented as deliberate in
-  `evals/trade_evaluator.py` but arguably the same kind of traceability
-  gap this fix just closed elsewhere). See the end of the "Milestone
-  10.5 fix 2" entry in [docs/iterations.md](iterations.md) for the full
-  audit.
+- **The schema audit is clean.** Fix 2's audit across all eight tables
+  found two gaps (`market_data` had no `mode` column, `evaluations` had
+  no `risk_reward_ratio` column); fix 3 closed both. `market_data.mode`
+  is now a real `NOT NULL` column, constrained to `LIVE`/`DEMO` at both
+  the database level (`CHECK`) and the application level
+  (`database/crud.py`). `evaluations.risk_reward_ratio` is now a nullable
+  `Float`, populated on `SUCCESS`, `NULL` on `FAILED`, kept out of the
+  original integer sum-rule `CHECK` constraint and enforced by its own
+  independent nullability constraint instead. Every field every pipeline
+  dataclass produces now has a corresponding column somewhere in
+  `database/models.py` — see the "Milestone 10.5 fix 3" entry in
+  [docs/iterations.md](iterations.md).
 - See "How to run everything" below for the exact request sequence to
   exercise the pipeline by hand.
 
@@ -182,14 +185,11 @@ standalone tool:
   to avoid churning the shell twice. The orchestrator this milestone
   needs (Milestone 10.5) is already done.
 - **Milestone 12 — Testing.** What this covers beyond the substantial
-  unit-test suite that already exists (192 tests across every backend
+  unit-test suite that already exists (197 tests across every backend
   module, including the orchestrator) isn't yet decided — likely
   candidates are frontend tests and an end-to-end pass, but that should
   be scoped as its own milestone discussion, not assumed here.
-- **Two known, still-open schema gaps** (reported, not fixed, during
-  Milestone 10.5 fix 2's full eight-table audit): `market_data` has no
-  `mode` (LIVE/DEMO) column of its own; `evaluations` has no
-  `risk_reward_ratio` column for the raw number behind
-  `risk_reward_score`. Neither blocks Milestone 11. See the audit at the
-  end of the "Milestone 10.5 fix 2" entry in
-  [docs/iterations.md](iterations.md).
+- **No known schema gaps remain.** The eight-table audit from Milestone
+  10.5 fix 2 found two gaps; fix 3 closed both (see section 1 above).
+  Nothing currently prevents Milestone 11 from building against the full
+  `GET /runs/{id}` shape.

@@ -71,9 +71,17 @@ class CaptureOut(BaseModel):
 
 
 class MarketDataOut(BaseModel):
+    """
+    Milestone 10.5 fix 3: mode ("LIVE" | "DEMO") exposes the quote's real
+    source directly on the record -- a client no longer has to infer it
+    from `source` ("demo_fixture" vs. "alpha_vantage"). Always present,
+    success or failure alike, matching CaptureOut.capture_mode.
+    """
+
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    mode: str
     symbol: str
     price: Optional[float]
     timestamp: Optional[datetime]
@@ -121,6 +129,10 @@ class EvaluationOut(BaseModel):
     directly on the record. The score fields are Optional because a
     FAILED row has every one of them, including total_score, set to
     null -- never zero, which is itself a real, meaningful score.
+
+    Milestone 10.5 fix 3: risk_reward_ratio is the raw computed number
+    (e.g. 2.0) behind risk_reward_score's 0/10/20 band -- the same
+    traceability the categorical fields give the other four components.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -133,6 +145,7 @@ class EvaluationOut(BaseModel):
     risk_reward_score: Optional[int]
     timing_context_score: Optional[int]
     total_score: Optional[int]
+    risk_reward_ratio: Optional[float]
     error_message: Optional[str]
     timestamp: datetime
 

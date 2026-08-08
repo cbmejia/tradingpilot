@@ -191,6 +191,9 @@ def test_every_stage_result_is_persisted_and_readable_via_get_run(client):
     assert full_run["market_data"][0]["status"] == "SUCCESS"
     assert full_run["market_data"][0]["price"] == 1.0921
     assert full_run["market_data"][0]["source"] == "demo_fixture"
+    # Milestone 10.5 fix 3: mode is stored directly, not just inferable
+    # from `source`.
+    assert full_run["market_data"][0]["mode"] == "DEMO"
 
     assert len(full_run["analyses"]) == 1
     analysis = full_run["analyses"][0]
@@ -215,6 +218,9 @@ def test_every_stage_result_is_persisted_and_readable_via_get_run(client):
     # matches docs/rubric.md's worked example: 76 total.
     assert full_run["evaluations"][0]["total_score"] == 76
     assert full_run["evaluations"][0]["risk_reward_score"] == 20
+    # Milestone 10.5 fix 3: the raw ratio behind that banded 20 is on the
+    # record too -- risk_reward_score=20 traces back to ratio=2.0.
+    assert full_run["evaluations"][0]["risk_reward_ratio"] == pytest.approx(2.0)
 
     assert len(full_run["guardrail_results"]) == len(ALL_GUARDRAIL_NAMES)
     assert full_run["completed_at"] is not None
@@ -351,6 +357,7 @@ def test_failed_agent_analysis_is_recorded_as_a_row_and_not_evaluated(client):
     assert evaluation["risk_reward_score"] is None
     assert evaluation["timing_context_score"] is None
     assert evaluation["total_score"] is None
+    assert evaluation["risk_reward_ratio"] is None
 
     # The audit trail still describes it too -- both are kept.
     audit_messages = " ".join(e["event_message"] for e in body["audit_events"])

@@ -182,11 +182,14 @@ def test_run_created_at_round_trips_as_timezone_aware_utc(session):
 
 
 def test_save_market_data(session):
+    """Milestone 10.5 fix 3: mode is stored directly on the record, not
+    just inferable from `source`."""
     run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
 
     data = crud.add_market_data(
         session,
         run_id=run.id,
+        mode="DEMO",
         symbol="EURUSD",
         source="demo_fixture",
         status="success",
@@ -196,6 +199,7 @@ def test_save_market_data(session):
     assert data.run_id == run.id
     assert data.price == 1.0921
     assert data.status == "success"
+    assert data.mode == "DEMO"
 
 
 def test_save_market_data_failure_records_error(session):
@@ -204,6 +208,7 @@ def test_save_market_data_failure_records_error(session):
     data = crud.add_market_data(
         session,
         run_id=run.id,
+        mode="LIVE",
         symbol="EURUSD",
         source="demo_fixture",
         status="error",
@@ -212,6 +217,84 @@ def test_save_market_data_failure_records_error(session):
 
     assert data.status == "error"
     assert data.price is None
+    assert data.mode == "LIVE"
+
+
+def test_save_market_data_mode_is_demo_for_a_demo_run(session):
+    """Requirement: a DEMO run stores mode DEMO, a LIVE run stores LIVE
+    (mirrored by test_save_market_data_mode_is_live_for_a_live_run
+    below)."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    data = crud.add_market_data(
+        session,
+        run_id=run.id,
+        mode="DEMO",
+        symbol="EURUSD",
+        source="demo_fixture",
+        status="success",
+        price=1.0921,
+    )
+
+    assert data.mode == "DEMO"
+
+
+def test_save_market_data_mode_is_live_for_a_live_run(session):
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    data = crud.add_market_data(
+        session,
+        run_id=run.id,
+        mode="LIVE",
+        symbol="EURUSD",
+        source="alpha_vantage",
+        status="success",
+        price=1.0921,
+    )
+
+    assert data.mode == "LIVE"
+
+
+def test_add_market_data_rejects_an_out_of_set_mode(session):
+    """Milestone 10.5 fix 3, application-level check: an out-of-set mode
+    value is rejected before anything is written."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    with pytest.raises(ValueError, match="mode"):
+        crud.add_market_data(
+            session,
+            run_id=run.id,
+            mode="SIMULATED",  # not a real value
+            symbol="EURUSD",
+            source="demo_fixture",
+            status="success",
+            price=1.0921,
+        )
+
+    reloaded = crud.get_run(session, run.id)
+    assert reloaded.market_data == []
+
+
+def test_check_constraint_rejects_an_out_of_set_market_data_mode(session):
+    """Milestone 10.5 fix 3, database-level check: bypassing crud.py
+    entirely, the CHECK constraint on MarketData.mode still refuses an
+    out-of-set value."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    bad_data = models.MarketData(
+        run_id=run.id,
+        mode="SIMULATED",  # not a real value
+        symbol="EURUSD",
+        source="demo_fixture",
+        status="success",
+        price=1.0921,
+    )
+    session.add(bad_data)
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+    session.rollback()
 
 
 def test_save_agent_analysis(session):
@@ -384,11 +467,33 @@ def test_save_evaluation_computes_total_score(session):
         entry_score=12,
         risk_reward_score=20,
         timing_context_score=10,
+        risk_reward_ratio=2.0,
     )
 
     assert evaluation.total_score == 18 + 15 + 12 + 20 + 10
     assert evaluation.status == "SUCCESS"
     assert evaluation.error_message is None
+    assert evaluation.risk_reward_ratio == 2.0
+
+
+def test_save_evaluation_risk_reward_ratio_round_trips(session):
+    """Milestone 10.5 fix 3: the stored ratio matches exactly what the
+    evaluator computed, surviving a real commit + refresh cycle."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    crud.add_evaluation(
+        session,
+        run_id=run.id,
+        trend_score=20,
+        structure_score=20,
+        entry_score=20,
+        risk_reward_score=20,
+        timing_context_score=20,
+        risk_reward_ratio=2.5,
+    )
+
+    reloaded = crud.get_run(session, run.id)
+    assert reloaded.evaluations[0].risk_reward_ratio == 2.5
 
 
 def test_save_failed_evaluation_stores_status_and_error_with_null_scores_not_zeros(session):
@@ -416,6 +521,7 @@ def test_save_failed_evaluation_stores_status_and_error_with_null_scores_not_zer
     assert evaluation.risk_reward_score is None
     assert evaluation.timing_context_score is None
     assert evaluation.total_score is None
+    assert evaluation.risk_reward_ratio is None
 
 
 def test_add_evaluation_has_no_total_score_parameter():
@@ -445,6 +551,7 @@ def test_add_evaluation_rejects_a_smuggled_total_score(session):
             entry_score=12,
             risk_reward_score=20,
             timing_context_score=10,
+            risk_reward_ratio=2.0,
             total_score=999,  # not a real parameter -- must be rejected
         )
 
@@ -456,6 +563,7 @@ def test_add_evaluation_rejects_a_smuggled_total_score(session):
         entry_score=12,
         risk_reward_score=20,
         timing_context_score=10,
+        risk_reward_ratio=2.0,
     )
 
     assert evaluation.total_score == 18 + 15 + 12 + 20 + 10
@@ -627,6 +735,7 @@ def test_run_relationships_reach_all_child_records(session):
     crud.add_market_data(
         session,
         run_id=run.id,
+        mode="DEMO",
         symbol="GBPUSD",
         source="demo_fixture",
         status="success",
@@ -654,6 +763,7 @@ def test_run_relationships_reach_all_child_records(session):
         entry_score=10,
         risk_reward_score=10,
         timing_context_score=10,
+        risk_reward_ratio=1.5,
     )
     crud.add_guardrail_result(
         session, run_id=run.id, guardrail_name="data_freshness", passed=True

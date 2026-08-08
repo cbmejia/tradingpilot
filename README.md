@@ -224,14 +224,17 @@ response already reflects the finished run.
    including `trend_direction`/`trend_quality`/`structure_quality`/
    `setup_quality`/`context_risk`) — not only in the audit trail.
    `evaluations[0]` shows the same shape (`status: "FAILED"`, every score
-   field `null`, never zero). On a successful analysis, `analyses[0]`
-   carries those same five categorical fields populated (e.g.
-   `trend_direction: "UP"`, `trend_quality: "STRONG"`) so you can trace
-   `evaluations[0]`'s `trend_score`/`structure_score`/`entry_score`/
-   `timing_context_score` back to the actual observation each one came
-   from, not just see the number. Either way you'll get `200` back with
-   the finished run: captures, market data, analysis, evaluation, all
-   eleven guardrail results, and
+   field `null`, never zero, including `risk_reward_ratio`). On a
+   successful analysis, `analyses[0]` carries those same five categorical
+   fields populated (e.g. `trend_direction: "UP"`, `trend_quality:
+   "STRONG"`) so you can trace `evaluations[0]`'s `trend_score`/
+   `structure_score`/`entry_score`/`timing_context_score` back to the
+   actual observation each one came from, and `evaluations[0]`'s
+   `risk_reward_ratio` (e.g. `2.0`) gives the same traceability for
+   `risk_reward_score`'s banded 0/10/20. `market_data[0]` always carries
+   `mode` (`"LIVE"`/`"DEMO"`) directly, not just inferable from `source`.
+   Either way you'll get `200` back with the finished run: captures,
+   market data, analysis, evaluation, all eleven guardrail results, and
    `guardrail_outcome`.
 3. Expand **`GET /runs/{run_id}`** → **Try it out** → same `run_id` →
    **Execute** to see the same thing again, plus the full `audit_events`
@@ -254,10 +257,12 @@ response already reflects the finished run.
 
 ## Status
 
-Milestone 10.5 of 12: orchestrator wires the 12-step pipeline, plus two
+Milestone 10.5 of 12: orchestrator wires the 12-step pipeline, plus three
 follow-up fixes — a failed agent analysis or evaluation is stored as a
 proper row (`status`/`error_message`, matching `captures`/`market_data`)
-instead of only being described in the audit trail, and a successful
-analysis now stores the five categorical fields the rubric actually
-scores from, so every component score traces back to its evidence. See
+instead of only being described in the audit trail; a successful
+analysis stores the five categorical fields the rubric actually scores
+from; and `market_data.mode` plus `evaluations.risk_reward_ratio` close
+out the schema audit, so every component score and every LIVE/DEMO claim
+now traces back to a real stored value, not an inference. See
 [docs/iterations.md](docs/iterations.md).

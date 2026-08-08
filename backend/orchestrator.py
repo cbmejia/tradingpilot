@@ -227,6 +227,7 @@ def run_pipeline(session: Session, run_id: str) -> Run:
     crud.add_market_data(
         session,
         run_id=run_id,
+        mode=market_data_result.mode.value,
         symbol=market_data_result.symbol,
         source=market_data_result.source,
         status=market_data_result.status.value,
@@ -311,6 +312,7 @@ def run_pipeline(session: Session, run_id: str) -> Run:
                 entry_score=evaluation_result.entry_score,
                 risk_reward_score=evaluation_result.risk_reward_score,
                 timing_context_score=evaluation_result.timing_context_score,
+                risk_reward_ratio=evaluation_result.risk_reward_ratio,
             )
         else:
             crud.add_failed_evaluation(

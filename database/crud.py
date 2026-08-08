@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session
 
 from database.models import (
     AGENT_CATEGORICAL_FIELDS,
+    MARKET_DATA_MODE_ALLOWED_VALUES,
     AgentAnalysis,
     AuditEvent,
     Capture,
@@ -27,6 +28,18 @@ from database.models import (
     MarketData,
     Run,
 )
+
+
+def _validate_mode(mode: str) -> None:
+    """
+    Application-level half of the market-data mode check (the other half
+    is the CHECK constraint on MarketData in database/models.py) -- same
+    defense-in-depth reasoning as _validate_categorical_fields() below.
+    tools/market_data.py's MarketDataManager already only ever produces
+    "LIVE" or "DEMO", so in the normal path this never fires.
+    """
+    if mode not in MARKET_DATA_MODE_ALLOWED_VALUES:
+        raise ValueError(f"mode={mode!r} is not one of the allowed values {MARKET_DATA_MODE_ALLOWED_VALUES}")
 
 
 def _validate_categorical_fields(**fields: Optional[str]) -> None:
@@ -155,6 +168,7 @@ def add_market_data(
     session: Session,
     *,
     run_id: str,
+    mode: str,
     symbol: str,
     source: str,
     status: str,
@@ -162,8 +176,20 @@ def add_market_data(
     timestamp: Optional[datetime] = None,
     error_message: Optional[str] = None,
 ) -> MarketData:
+    """
+    Record a market-data fetch attempt, success or failure alike.
+
+    mode ("LIVE" | "DEMO", Milestone 10.5 fix 3) is required, not
+    optional/defaulted -- every real MarketQuote has one, even on
+    failure, matching how add_capture()'s capture_mode already works.
+    Validated against the allowed set before anything is written; see
+    _validate_mode() above for why this check exists here too, not just
+    as the CHECK constraint on MarketData.
+    """
+    _validate_mode(mode)
     data = MarketData(
         run_id=run_id,
+        mode=mode,
         symbol=symbol,
         price=price,
         timestamp=timestamp,
@@ -281,6 +307,7 @@ def add_evaluation(
     entry_score: int,
     risk_reward_score: int,
     timing_context_score: int,
+    risk_reward_ratio: float,
 ) -> Evaluation:
     """
     Record a SUCCESSFUL rubric evaluation for a run.
@@ -291,6 +318,12 @@ def add_evaluation(
     status is always "SUCCESS" here, never a parameter -- for a failed
     evaluation, see add_failed_evaluation() below, which cannot be used to
     smuggle in a score either (it has no score parameters at all).
+
+    risk_reward_ratio (Milestone 10.5 fix 3) is the raw computed ratio
+    (e.g. 2.0) behind risk_reward_score's banded value -- required, not
+    optional/defaulted, since a real SUCCESS evaluation always has one.
+    It is stored as-is, never included in the total_score sum (that sum
+    is int-only, unaffected by this float).
     """
     total_score = (
         trend_score
@@ -308,6 +341,7 @@ def add_evaluation(
         risk_reward_score=risk_reward_score,
         timing_context_score=timing_context_score,
         total_score=total_score,
+        risk_reward_ratio=risk_reward_ratio,
     )
     session.add(evaluation)
     session.commit()
@@ -339,6 +373,7 @@ def add_failed_evaluation(
         risk_reward_score=None,
         timing_context_score=None,
         total_score=None,
+        risk_reward_ratio=None,
         error_message=error_message,
     )
     session.add(evaluation)

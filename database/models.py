@@ -46,6 +46,13 @@ def _categorical_allowed_check(column_name: str) -> str:
     return f"{column_name} IS NULL OR {column_name} IN ('{values}')"
 
 
+# The two source modes every LIVE/DEMO-split tool in this app can be in
+# (capture/base.py's CaptureMode, tools/market_data.py's MarketDataMode).
+# Duplicated here for the same reason AGENT_CATEGORICAL_FIELDS is: so
+# database/ stays a leaf module that doesn't import capture/ or tools/.
+MARKET_DATA_MODE_ALLOWED_VALUES: tuple[str, ...] = ("LIVE", "DEMO")
+
+
 def _new_run_id() -> str:
     return uuid4().hex
 
@@ -126,12 +133,34 @@ class Capture(Base):
 
 
 class MarketData(Base):
-    """One market-data snapshot attempt for a run."""
+    """
+    One market-data snapshot attempt for a run.
+
+    mode ("LIVE" | "DEMO", Milestone 10.5 fix 3) stores MarketQuote.mode
+    directly -- always present, success or failure alike, matching how
+    Capture.capture_mode already works. Before this fix, whether a quote
+    was DEMO-sourced was only inferable indirectly from `source`
+    ("demo_fixture" vs. "alpha_vantage"), a string that happens to be
+    mode-specific today but isn't a structural guarantee. That mattered
+    because the SYNTHETIC_DATA guardrail's whole job is proving a run
+    used sample data -- its evidence belongs in a real column, not an
+    inference. Constrained to exactly "LIVE"/"DEMO" by the CHECK
+    constraint below (database level) and by crud.add_market_data()
+    (application level) -- the same double-enforcement pattern used for
+    the agent's categorical fields.
+    """
 
     __tablename__ = "market_data"
+    __table_args__ = (
+        CheckConstraint(
+            "mode IN ('LIVE', 'DEMO')",
+            name="ck_market_data_mode_allowed",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
+    mode: Mapped[str] = mapped_column(String(10))  # "LIVE" | "DEMO"
     symbol: Mapped[str] = mapped_column(String(20))
     price: Mapped[float | None] = mapped_column(Float, nullable=True)
     timestamp: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
@@ -228,8 +257,8 @@ class Evaluation(Base):
     crud.add_evaluation() as the sum of the five component scores below.
     That's enforced at the Python level, but Python-level discipline alone
     can be bypassed by constructing Evaluation(...) directly with whatever
-    total_score you like — so the CHECK constraint below enforces the same
-    rule at the database level, for a SUCCESS row.
+    total_score you like — so the first CHECK constraint below enforces
+    the same rule at the database level, for a SUCCESS row.
 
     A FAILED row (the agent analysis failed, or the risk/reward numbers
     were incoherent) stores no scores at all -- every score column,
@@ -237,8 +266,9 @@ class Evaluation(Base):
     score, and storing it for a run that was never actually scored would
     be indistinguishable from a genuine all-zero evaluation.
 
-    The CHECK constraint below enforces both halves of that split at once,
-    keyed off status, so there is no third possibility a row could be in:
+    The first CHECK constraint enforces both halves of that split at
+    once, keyed off status, so there is no third possibility a row could
+    be in:
     - status='SUCCESS' requires all six score columns to be non-null AND
       total_score to exactly equal the sum of the other five (the
       original Milestone 3 rule, unchanged for this case).
@@ -246,6 +276,17 @@ class Evaluation(Base):
     Any other combination (a SUCCESS row with a null score, a FAILED row
     with a non-null score, an unrecognized status value entirely) fails
     the constraint and the row is refused, however it was constructed.
+
+    risk_reward_ratio (Milestone 10.5 fix 3) is the raw computed number
+    (e.g. 2.0) behind risk_reward_score's 0/10/20 band -- the same
+    traceability the five categorical fields already give the other four
+    components. It is a float, and deliberately kept OUT of the sum-rule
+    CHECK constraint above (total_score is a sum of integers; mixing a
+    float into that equality would be a correctness risk for no reason,
+    since the ratio was never part of what total_score sums). Its own
+    nullability is enforced by a SECOND, independent CHECK constraint
+    below, following the exact same status-keyed shape as the first:
+    null on FAILED, non-null on SUCCESS.
     """
 
     __tablename__ = "evaluations"
@@ -266,6 +307,11 @@ class Evaluation(Base):
             ")",
             name="ck_evaluations_total_score_is_sum_of_components",
         ),
+        CheckConstraint(
+            "(status = 'FAILED' AND risk_reward_ratio IS NULL) "
+            "OR (status = 'SUCCESS' AND risk_reward_ratio IS NOT NULL)",
+            name="ck_evaluations_risk_reward_ratio_matches_status",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -277,6 +323,7 @@ class Evaluation(Base):
     risk_reward_score: Mapped[int | None] = mapped_column(nullable=True)
     timing_context_score: Mapped[int | None] = mapped_column(nullable=True)
     total_score: Mapped[int | None] = mapped_column(nullable=True)
+    risk_reward_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
 

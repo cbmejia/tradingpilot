@@ -1255,6 +1255,114 @@ being computed rather than stored is a separate, already-documented,
 deliberate design choice (Milestone 10's architecture notes), not a gap
 of this kind.
 
+## Milestone 10.5 fix 3 — store market data mode and risk/reward ratio
+
+Closed both remaining gaps from the schema audit at the end of the
+Milestone 10.5 fix 2 entry above.
+
+**Gap 1 — `market_data` had no `mode` column.** `Capture` stores
+`capture_mode` (`"LIVE"`/`"DEMO"`) directly; `MarketQuote.mode` was never
+persisted, only inferable indirectly through `source`
+(`"demo_fixture"` vs. `"alpha_vantage"`) -- a string that happens to be
+mode-specific today but was never a structural guarantee. This mattered
+specifically because `SYNTHETIC_DATA` (`guardrails/rules.py`) is the
+guardrail that makes a DEMO-sourced run provably unable to reach
+`READY_FOR_REVIEW` -- its own evidence (was this quote really DEMO?)
+belongs in a real column, not a string a reader has to already know how
+to interpret.
+
+- `database/models.py` — `MarketData` gained `mode` (`String(10)`, `NOT
+  NULL` -- always present, success or failure alike, matching
+  `capture_mode`), constrained by a new `CHECK` constraint
+  (`ck_market_data_mode_allowed`, `mode IN ('LIVE', 'DEMO')`) built from
+  a new `MARKET_DATA_MODE_ALLOWED_VALUES` constant. Same reasoning as
+  `AGENT_CATEGORICAL_FIELDS`: duplicated from
+  `capture.base.CaptureMode`/`tools.market_data.MarketDataMode` rather
+  than imported, so `database/` stays a leaf module.
+- `database/crud.py` — `add_market_data()` gained a required `mode`
+  parameter, validated by a new `_validate_mode()` helper before
+  anything is written (application level, alongside the `CHECK`
+  constraint at the database level -- the same double-enforcement
+  pattern as the categorical fields).
+- `backend/orchestrator.py` — the one call site now passes
+  `market_data_result.mode.value` straight through.
+- `backend/schemas.py` — `MarketDataOut` gained `mode: str`.
+
+**Gap 2 — `evaluations` had no `risk_reward_ratio` column.** The banded
+score (`risk_reward_score`: 0/10/20) was stored; the raw ratio behind it
+(e.g. `2.0`) wasn't -- the exact same traceability gap Milestone 10.5 fix
+2 closed for the other four components, just for the one component whose
+evidence is a number instead of a category word.
+
+- `database/models.py` — `Evaluation` gained `risk_reward_ratio` (`Float`,
+  nullable). **Deliberately kept out of the existing sum-rule `CHECK`
+  constraint** (`ck_evaluations_total_score_is_sum_of_components`, which
+  is completely unmodified by this fix) per the explicit instruction --
+  `total_score` sums five integers, and mixing a float into that equality
+  would be a correctness risk (float rounding) for a value that was never
+  part of what the sum represents anyway. Its own nullability (`NULL` on
+  `FAILED`, required on `SUCCESS`) is enforced by a **second, independent**
+  `CHECK` constraint (`ck_evaluations_risk_reward_ratio_matches_status`)
+  that follows the identical status-keyed shape as the first, just for
+  this one column.
+- `database/crud.py` — `add_evaluation()` gained a required
+  `risk_reward_ratio` parameter, stored as-is (not recomputed --
+  `evals/trade_evaluator.py` already computed it once; storing it again
+  independently would risk two numbers disagreeing). `add_failed_evaluation()`
+  sets it to `None` alongside the other score columns.
+- `backend/orchestrator.py` — the one call site now passes
+  `evaluation_result.risk_reward_ratio` straight through.
+- `backend/schemas.py` — `EvaluationOut` gained
+  `risk_reward_ratio: Optional[float]`.
+
+**Both fixes follow the exact same "duplicate the allowed set, validate
+at both levels, thread the value through the one orchestrator call site"
+shape as Milestone 10.5 fix 2** -- no new architectural decisions, just
+the same pattern applied to the two remaining gaps.
+
+- `tests/test_database.py` — 5 tests added: mode `DEMO` for a DEMO run,
+  mode `LIVE` for a LIVE run, an out-of-set mode rejected at the
+  application level (nothing written), an out-of-set mode rejected at the
+  database level (direct `models.MarketData(...)` construction,
+  `IntegrityError`), and `risk_reward_ratio` round-tripping through a real
+  commit + refresh. `test_save_market_data`, `test_save_market_data_
+  failure_records_error`, `test_save_evaluation_computes_total_score`,
+  `test_add_evaluation_rejects_a_smuggled_total_score`, and
+  `test_run_relationships_reach_all_child_records` (all pre-existing)
+  updated to pass the new required parameters. The four pre-existing
+  `evaluations` `CHECK`-constraint tests needed **no changes at all** --
+  each already either sets `risk_reward_ratio`-consistent state
+  incidentally (the all-null `FAILED` test) or was already failing the
+  original sum-rule constraint independently (the mismatched-total
+  tests), so adding a second constraint didn't change any of their
+  outcomes; confirmed by running them, not just reasoned about.
+- `tests/test_orchestrator.py` — the full-success `GET /runs/{id}` test
+  extended to assert `market_data[0].mode == "DEMO"` and
+  `evaluations[0].risk_reward_ratio == 2.0`; the failed-evaluation test
+  extended to assert `risk_reward_ratio is None` alongside the other
+  null score fields.
+
+All 197 tests pass (33 database + 25 API + 17 capture + 19 market data +
+25 agent + 32 evaluation + 36 guardrails + 10 orchestrator).
+
+Manually verified end to end without any real API call, same method as
+the Milestone 10.5 fix 2 entry (the real FastAPI app via `TestClient`,
+pointed at the real, freshly-recreated dev database, with
+`backend.orchestrator.TradeAgent` patched to a forced-`SUCCESS` stub --
+confirmed via `mock_agent.analyze.called == True`). `GET /runs/{id}`
+showed `market_data[0].mode: "DEMO"` and
+`evaluations[0].risk_reward_ratio: 2.0000000000000444` (floating-point
+noise from the same `(target - entry) / (entry - stop)` division that's
+always produced this; `risk_reward_score: 20` is the banded value of
+that same number). Dev database reset to empty afterward.
+
+**The schema audit is now clean.** Re-checked all eight tables against
+what the pipeline's dataclasses (`CaptureResult`, `MarketQuote`,
+`AgentAnalysisResult`, `EvaluationResult`, `GuardrailCheck`) actually
+produce: every field on every one of those five dataclasses now has a
+corresponding column somewhere in `database/models.py`. No remaining
+place where the pipeline computes something the schema can't store.
+
 ## Rebuilding the database
 
 `init_db()` only ever adds tables that don't exist yet — it never alters
