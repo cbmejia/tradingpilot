@@ -1,10 +1,10 @@
-# TradePilot AI — the only sanctioned way application code writes to the
-# audit trail tables.
+# TradePilot AI — the only sanctioned way application code reads and
+# writes the audit trail tables.
 #
 # In plain terms: instead of letting every part of the app build database
-# rows by hand, they all go through one of the functions below. That way
-# there's exactly one place that knows how to correctly save a Run, a
-# Capture, an Evaluation, and so on.
+# rows (or queries) by hand, they all go through one of the functions
+# below. That way there's exactly one place that knows how to correctly
+# save or fetch a Run, a Capture, an Evaluation, and so on.
 #
 # The important one is add_evaluation(): it does NOT accept a total_score
 # argument. It always computes the total itself from the five component
@@ -52,6 +52,27 @@ def create_run(
     session.commit()
     session.refresh(run)
     return run
+
+
+def get_run(session: Session, run_id: str) -> Optional[Run]:
+    """Fetch one run by id, or None if it doesn't exist."""
+    return session.get(Run, run_id)
+
+
+def list_runs(session: Session, *, limit: int = 20, offset: int = 0) -> tuple[list[Run], int]:
+    """
+    Fetch a page of runs, newest first, plus the total count of all runs
+    (so the caller can build paging info without a second round trip).
+    """
+    total = session.query(Run).count()
+    runs = (
+        session.query(Run)
+        .order_by(Run.created_at.desc())
+        .limit(limit)
+        .offset(offset)
+        .all()
+    )
+    return runs, total
 
 
 def add_capture(

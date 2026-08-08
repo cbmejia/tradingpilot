@@ -39,6 +39,37 @@ def session():
         db.close()
 
 
+def test_foreign_keys_are_enforced_on_a_fresh_engine():
+    """
+    PRAGMA foreign_keys=ON is applied via an event listener registered on
+    the SQLAlchemy Engine class itself (see database/database.py), which
+    means it fires for every connection on every engine in the process --
+    not just the app's main engine. This test builds its own brand-new
+    engine (never touched by any other test or by database.py's
+    module-level engine) to prove the listener really does apply globally,
+    not just to a connection someone happened to set up by hand.
+    """
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(bind=engine)
+    TestSession = sessionmaker(bind=engine)
+    db = TestSession()
+
+    orphan_capture = models.Capture(
+        run_id="does-not-exist",
+        capture_mode="demo",
+        symbol="EURUSD",
+        timeframe="1h",
+        status="success",
+    )
+    db.add(orphan_capture)
+
+    with pytest.raises(IntegrityError):
+        db.commit()
+
+    db.rollback()
+    db.close()
+
+
 def test_database_initialization_creates_all_tables():
     engine = create_engine("sqlite:///:memory:")
 

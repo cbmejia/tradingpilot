@@ -30,7 +30,21 @@ what's next.
 - `docs/` — architecture, testing, and iteration notes
 - `tests/` — automated tests
 
+## Running the backend
+
+```bash
+cd backend  # not required, just for context -- run these from the repo root
+python -m venv .venv
+.venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
+pip install -r backend/requirements.txt
+uvicorn backend.main:app --reload
+```
+
+Open **http://127.0.0.1:8000/docs** for interactive API docs (Swagger UI) —
+you can create and fetch runs directly from the browser. Run `pytest` from
+the repo root to run the test suite.
+
 ## Status
 
-Milestone 3 of 12: database schema and audit trail. See
+Milestone 4 of 12: backend API and run lifecycle. See
 [docs/iterations.md](docs/iterations.md).

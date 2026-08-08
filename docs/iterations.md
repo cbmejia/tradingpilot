@@ -100,6 +100,67 @@ captured_at`) and an auto-generated one (`Run.created_at`); the
 `add_evaluation` rejection test; and the database-level `CHECK` constraint
 test.
 
+## Pre-Milestone-4 verification
+
+Two checks requested before starting the API, both done by inspecting the
+actual runtime behavior rather than just the source:
+
+- **Score column types.** `trend_score`, `structure_score`, `entry_score`,
+  `risk_reward_score`, `timing_context_score`, and `total_score` are all
+  `Integer` (confirmed by inspecting the compiled column types, not just
+  the `Mapped[int]` annotation). No floating-point rounding risk for the
+  `CHECK` constraint — nothing changed.
+- **`PRAGMA foreign_keys=ON`.** Confirmed it's applied via
+  `@event.listens_for(Engine, "connect")` in `database/database.py`,
+  registered on the SQLAlchemy `Engine` class itself, so it fires for
+  every connection on every engine in the process, not just the app's
+  main one. Verified with a brand-new, independent in-memory engine that
+  a foreign-key violation is still rejected. Added a permanent regression
+  test, `test_foreign_keys_are_enforced_on_a_fresh_engine`, to
+  `tests/test_database.py` (19 tests total now, up from 18).
+
+## Milestone 4 — Backend API and run lifecycle
+
+Built the FastAPI backend that creates and reads runs. No pipeline tools
+(capture, market data, agent, evaluation, guardrails) exist yet and none
+were built or faked — creating a run only writes a database record.
+
+- `backend/config.py` — the one place that reads settings from `.env`
+  (host/port, capture/market-data mode, Claude model, CORS origins). No
+  hardcoded or invented secrets.
+- `backend/schemas.py` — pydantic request/response models for every
+  endpoint, including a fixed set of allowed timeframes and a `gt=0`
+  constraint on entry/stop/target. No schema anywhere accepts a total
+  evaluation score from the client.
+- `backend/api/routes_health.py` — `GET /health`, confirms the database
+  is reachable with a real `SELECT 1`.
+- `backend/api/routes_runs.py` — `POST /runs` (creates a `Run` with
+  status `CREATED` and writes a `run_created` audit event — nothing
+  else), `GET /runs` (newest-first, paged), `GET /runs/{id}` (the run
+  plus every child table — the full audit trail; 404 if missing).
+- `backend/main.py` — the FastAPI app: CORS restricted to
+  `localhost:5173`/`5174`, and a startup step that calls `init_db()` so a
+  fresh clone works without a manual step.
+- `database/crud.py` — added `get_run()` and `list_runs()` (read-only,
+  alongside the existing write functions).
+- `tests/conftest.py` — points the app's fallback database at a
+  throwaway file the moment pytest starts, before anything else can
+  import `database.database` and bind to the real file.
+- `tests/test_api.py` — 11 tests: health check, valid run creation,
+  minimal (symbol + timeframe only) run creation, invalid timeframe
+  (422), negative and zero entry/stop (422), 404 on a missing run,
+  newest-first listing, paging, a full run showing its creation audit
+  event, and timezone-aware ISO 8601 timestamps in responses.
+
+Verified against the real running server too, not just the test client:
+started `uvicorn backend.main:app`, and confirmed `/health`, `POST
+/runs`, `GET /runs`, a rejected invalid timeframe, and `/docs` (200) all
+work. The dev database was reset to empty afterward so first-run
+instructions match a clean clone.
+
+All 30 tests pass (19 database + 11 API). No frontend changes, no
+orchestrator logic, no human-review endpoint (that's Milestone 10).
+
 ## Rebuilding the database
 
 `init_db()` only ever adds tables that don't exist yet — it never alters
@@ -125,7 +186,7 @@ isn't forgotten.
 1. ~~Architecture~~
 2. ~~Folder structure~~
 3. ~~Database schema~~
-4. Backend API
+4. ~~Backend API~~
 5. Screenshot tool
 6. Market-data tool
 7. Agent loop
