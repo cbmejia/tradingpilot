@@ -156,6 +156,40 @@ guardrails simultaneously, while still looking legitimate.
   unrecognized symbol fails clearly rather than substituting another
   pair's price.
 
+## Agent design
+
+`agents/trade_agent.py`'s `TradeAgent.analyze(capture_result,
+market_data_result, trade_params)` sends the screenshot and market data
+snapshot to Claude and returns an `AgentAnalysisResult` — a fixed shape
+of qualitative fields (`analysis_text`, `trend_assessment`,
+`structure_assessment`, `setup_assessment`, `uncertainty`), a `status`
+(`SUCCESS`/`FAILED`), a timezone-aware UTC `timestamp`, and
+`error_message`.
+
+**The hard boundary:** the agent produces words, never numbers that
+could function as a score. `_parse_response()` requires Claude's reply
+to match the expected JSON shape exactly — every text field must
+actually be text, `uncertainty` must be one of `LOW`/`MEDIUM`/`HIGH`,
+and any extra field carrying a number is treated as an attempted score.
+Any violation rejects the *entire* response as `FAILED` rather than
+stripping the bad part and keeping the rest — a model response that
+broke this rule once isn't trusted to have followed the others
+correctly. All scoring is Milestone 8's `evals/trade_evaluator.py`, in
+plain deterministic Python, computed from these qualitative fields.
+
+Before any API call, `analyze()` checks both inputs are actually
+`SUCCESS` — a failed capture or a failed market-data fetch returns a
+`FAILED` analysis immediately, with no Claude request made at all (this
+both saves money and stops the agent from reasoning about data that was
+never actually retrieved).
+
+The prompts (`prompts/system_prompt.md`, `prompts/analysis_prompt.md`)
+explicitly instruct the model to prefer `HIGH` uncertainty and honest
+"can't tell" language over a confident-sounding guess, and to never
+phrase anything as an instruction to buy, sell, or otherwise place a
+trade — consistent with this app never executing trades under any
+circumstances.
+
 ## Data flow (per run)
 
 ```

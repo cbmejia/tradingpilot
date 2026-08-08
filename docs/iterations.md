@@ -314,6 +314,87 @@ Not wired into the orchestrator, the agent, or the frontend, and no
 market-data API endpoint was added. All 65 tests pass (19 database + 11
 API + 17 capture + 18 market data).
 
+## Milestone 7 — Agent loop with qualitative analysis
+
+Built `agents/trade_agent.py`: `TradeAgent.analyze(capture_result,
+market_data_result, trade_params)` sends the screenshot and market data
+to Claude and returns an `AgentAnalysisResult` — words only, never a
+number that could function as a score.
+
+**THE HARD BOUNDARY, and how it's actually enforced (not just asked
+nicely):** `_parse_response()` requires Claude's reply to be a JSON
+object with exactly five expected fields, all text
+(`analysis_text`/`trend_assessment`/`structure_assessment`/
+`setup_assessment` as strings, `uncertainty` as one of `LOW`/`MEDIUM`/
+`HIGH`). If the response contains any *extra* field whose value is a
+number (e.g. a smuggled `"confidence_score": 87`), or if `uncertainty`
+or any text field isn't a string, the **entire response is rejected** —
+not partially trusted. A rejected response means every field on the
+result is `None`; there is no code path where a stripped-but-otherwise-
+accepted response reaches storage. This was a deliberate choice between
+"strip the bad field and keep the rest" and "reject the whole thing" —
+reject was chosen because a model that ignored the no-scores instruction
+once can't be trusted to have followed the rest of the instructions
+correctly either.
+
+- **Input validation before any API call.** If `capture_result.status`
+  or `market_data_result.status` isn't `SUCCESS`, `analyze()` returns a
+  `FAILED` result immediately and never touches the Claude client —
+  confirmed in tests via `client.messages.create.assert_not_called()`.
+  This is the same "no fabricated data" principle as `capture/` and
+  `tools/market_data.py`: never reason about inputs that don't exist.
+- **The agent is allowed — and told — to not know.** Both prompts
+  explicitly instruct HIGH uncertainty (and "insufficient information"
+  language) whenever the chart is unclear, and state plainly that a
+  confident-sounding read of an unclear chart is a failure, not a
+  success. A test confirms a HIGH-uncertainty, "not readable" response is
+  accepted normally, not treated as some kind of error.
+- **Never phrases anything as an instruction to trade.** Both prompt
+  files state this as a hard rule (never say "buy"/"sell"/"enter"/"exit",
+  never phrase output as an instruction to act) — the agent describes
+  what's observable, nothing more. Enforcement here is at the prompt
+  level (Claude's own compliance), the same way the "no execution"
+  invariant for the whole app is architectural, not a runtime check on
+  free text.
+- `prompts/system_prompt.md` / `prompts/analysis_prompt.md` — real,
+  editable Markdown files (not hardcoded strings), read fresh from disk
+  on every call. `analysis_prompt.md` is a template rendered per-request
+  with the symbol, timeframe, price, quote timestamp, source, and any
+  trade params (each defaulting to "not provided" rather than being
+  omitted or guessed).
+- **API errors, timeouts, and a missing key are all `FAILED`, never a
+  fabricated analysis.** A 60-second hard timeout on the Claude call;
+  `anthropic.APITimeoutError` and the broader `anthropic.APIError`
+  (covers rate limits and everything else) are both caught and turned
+  into a `FAILED` result carrying the real error text. Reads
+  `ANTHROPIC_API_KEY` from `.env` only — already present as a placeholder
+  from Milestone 2, now documented with the signup URL.
+- `tests/test_agent.py` — 20 tests, no real API calls: failed
+  capture/market-data short-circuits (with the "never called the API"
+  assertion), a well-formed response mapping correctly, a markdown-fenced
+  response still parsing, uncertainty case-normalization, a HIGH-
+  uncertainty "can't tell" response being accepted normally, four
+  variations of the hard-boundary rejection (extra numeric field, numeric
+  uncertainty, numeric text field, percentage-style uncertainty string),
+  three malformed-response failures (not JSON, missing field, invalid
+  uncertainty word), a real `anthropic.APITimeoutError` and a real
+  `anthropic.APIConnectionError` (both constructed directly against the
+  SDK's actual exception classes, no network), a missing-API-key
+  short-circuit, timezone-aware timestamp on success and `None` timestamp
+  on failure, a prompt-content sanity check, and the module-level
+  `analyze()` convenience function.
+
+Manually verified from the terminal: a real DEMO-mode capture + DEMO-mode
+market data feeding into the real `TradeAgent` (no `ANTHROPIC_API_KEY`
+set yet) fails cleanly with `status=FAILED` and a message pointing at the
+Anthropic console — no fabricated analysis, exactly as designed. A real
+model call (once a key is available) will be added to this log as a
+follow-up.
+
+Not wired into the orchestrator or the frontend, and no agent API
+endpoint was added. All 85 tests pass (19 database + 11 API + 17 capture
++ 18 market data + 20 agent).
+
 ## Rebuilding the database
 
 `init_db()` only ever adds tables that don't exist yet — it never alters
@@ -342,7 +423,7 @@ isn't forgotten.
 4. ~~Backend API~~
 5. ~~Screenshot tool~~
 6. ~~Market-data tool~~
-7. Agent loop
+7. ~~Agent loop~~
 8. Evaluation
 9. Guardrails
 10. Human approval

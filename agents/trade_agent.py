@@ -1,3 +1,339 @@
-# TradePilot AI — core trading agent.
-# Will orchestrate tools, prompts, guardrails, and evals to analyze trades.
-# Not implemented yet.
+# TradePilot AI — the trading agent: wraps the Claude call.
+#
+# In plain terms: this takes a chart screenshot and a market data quote,
+# shows both to Claude, and turns Claude's reply into a structured,
+# qualitative analysis (trend/structure/setup/uncertainty, all in words).
+#
+# THE HARD BOUNDARY: the agent produces WORDS, never numbers that could
+# function as a score. It never outputs a total score, a component score,
+# a percentage confidence, or a 0-100 rating -- the evaluation engine
+# (Milestone 8) computes every number itself, from these qualitative
+# fields, in plain deterministic Python. If Claude's response contains
+# anything numeric where a score could hide -- an extra numeric field, a
+# non-text value in a text field, a non-LOW/MEDIUM/HIGH value in
+# uncertainty -- this rejects the ENTIRE response as FAILED rather than
+# trying to salvage the "clean" parts. A model that ignored this
+# instruction once can't be trusted to have followed it correctly
+# elsewhere in the same response.
+
+from __future__ import annotations
+
+import base64
+import json
+import mimetypes
+import os
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from enum import Enum
+from pathlib import Path
+from typing import Optional
+
+import anthropic
+from dotenv import load_dotenv
+
+from capture.base import CaptureResult, CaptureStatus
+from tools.market_data import MarketDataStatus, MarketQuote
+
+load_dotenv()
+
+PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
+SYSTEM_PROMPT_PATH = PROMPTS_DIR / "system_prompt.md"
+ANALYSIS_PROMPT_PATH = PROMPTS_DIR / "analysis_prompt.md"
+
+DEFAULT_TIMEOUT_SECONDS = 60.0  # hard cap on the Claude API call -- no infinite wait
+DEFAULT_MAX_TOKENS = 1024
+
+EXPECTED_FIELDS = {
+    "analysis_text",
+    "trend_assessment",
+    "structure_assessment",
+    "setup_assessment",
+    "uncertainty",
+}
+ALLOWED_UNCERTAINTY = {"LOW", "MEDIUM", "HIGH"}
+
+
+class AgentAnalysisStatus(str, Enum):
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True)
+class TradeParams:
+    """Optional context from the user. Never treated as an instruction."""
+
+    direction: Optional[str] = None
+    entry: Optional[float] = None
+    stop: Optional[float] = None
+    target: Optional[float] = None
+
+
+@dataclass(frozen=True)
+class AgentAnalysisResult:
+    """
+    What every analysis attempt returns, success or failure alike.
+
+    Every field here is qualitative text except status, timestamp, and
+    error_message -- there is deliberately no numeric score field on this
+    dataclass at all. timestamp is set only on success, and is the real
+    moment this analysis was produced (right after Claude responded), not
+    a placeholder or a later database-write time.
+    """
+
+    status: AgentAnalysisStatus
+    analysis_text: Optional[str]
+    trend_assessment: Optional[str]
+    structure_assessment: Optional[str]
+    setup_assessment: Optional[str]
+    uncertainty: Optional[str]  # "LOW" | "MEDIUM" | "HIGH"
+    timestamp: Optional[datetime]
+    error_message: Optional[str] = None
+
+
+def _load_image_as_base64(path: str) -> tuple[str, str]:
+    file_path = Path(path)
+    data = file_path.read_bytes()
+    media_type = mimetypes.guess_type(file_path.name)[0] or "image/png"
+    return base64.b64encode(data).decode("ascii"), media_type
+
+
+def _format_param(value: Optional[object]) -> str:
+    return "not provided" if value is None else str(value)
+
+
+def _render_analysis_prompt(
+    template: str,
+    capture_result: CaptureResult,
+    market_data_result: MarketQuote,
+    trade_params: TradeParams,
+) -> str:
+    quote_timestamp = (
+        market_data_result.timestamp.isoformat() if market_data_result.timestamp else "unknown"
+    )
+    return template.format(
+        symbol=market_data_result.symbol,
+        timeframe=capture_result.timeframe,
+        price=market_data_result.price,
+        quote_timestamp=quote_timestamp,
+        source=market_data_result.source,
+        direction=_format_param(trade_params.direction),
+        entry=_format_param(trade_params.entry),
+        stop=_format_param(trade_params.stop),
+        target=_format_param(trade_params.target),
+    )
+
+
+def _extract_text(response) -> str:
+    parts = []
+    for block in getattr(response, "content", None) or []:
+        text = getattr(block, "text", None)
+        if text:
+            parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def _strip_markdown_fence(raw_text: str) -> str:
+    text = raw_text.strip()
+    if text.startswith("```"):
+        lines = text.splitlines()
+        lines = lines[1:]  # drop the opening ``` or ```json line
+        if lines and lines[-1].strip().startswith("```"):
+            lines = lines[:-1]
+        text = "\n".join(lines).strip()
+    return text
+
+
+def _parse_response(raw_text: str) -> dict:
+    """
+    Parses and validates Claude's reply against the expected qualitative
+    shape. Raises ValueError for anything malformed OR anything numeric
+    that could function as a score -- both are treated the same way by
+    the caller: the whole response is rejected, not partially trusted.
+    """
+    text = _strip_markdown_fence(raw_text)
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"response was not valid JSON: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(f"response JSON was a {type(data).__name__}, not an object")
+
+    missing = EXPECTED_FIELDS - data.keys()
+    if missing:
+        raise ValueError(f"response is missing required field(s): {sorted(missing)}")
+
+    # THE HARD BOUNDARY: any extra field carrying a number is treated as
+    # an attempted score and rejects the whole response.
+    extra_keys = set(data.keys()) - EXPECTED_FIELDS
+    numeric_extras = [
+        key
+        for key in extra_keys
+        if isinstance(data[key], (int, float)) and not isinstance(data[key], bool)
+    ]
+    if numeric_extras:
+        raise ValueError(
+            f"response included numeric field(s) {sorted(numeric_extras)} -- the agent "
+            f"never accepts a score, rating, or confidence number from the model"
+        )
+
+    text_fields: dict[str, str] = {}
+    for key in ("analysis_text", "trend_assessment", "structure_assessment", "setup_assessment"):
+        value = data[key]
+        if not isinstance(value, str):
+            raise ValueError(f"'{key}' must be text, got {type(value).__name__}")
+        text_fields[key] = value.strip()
+
+    uncertainty_raw = data["uncertainty"]
+    if not isinstance(uncertainty_raw, str):
+        raise ValueError(
+            f"'uncertainty' must be one of {sorted(ALLOWED_UNCERTAINTY)}, "
+            f"got a {type(uncertainty_raw).__name__} instead of text"
+        )
+    uncertainty = uncertainty_raw.strip().upper()
+    if uncertainty not in ALLOWED_UNCERTAINTY:
+        raise ValueError(
+            f"'uncertainty' must be one of {sorted(ALLOWED_UNCERTAINTY)}, got {uncertainty_raw!r}"
+        )
+
+    return {**text_fields, "uncertainty": uncertainty}
+
+
+class TradeAgent:
+    def __init__(
+        self,
+        model: Optional[str] = None,
+        timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        client: Optional[object] = None,
+    ):
+        """
+        model: Claude model id. Defaults to the CLAUDE_MODEL environment
+        variable, then "claude-sonnet-5" if unset.
+
+        client: an object with a `.messages.create(...)` method matching
+        anthropic.Anthropic's interface. Exists so tests can inject a
+        fake client without any real API key or network access. Normal
+        callers leave this None.
+        """
+        self._model = model or os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
+        self._timeout_seconds = timeout_seconds
+        self._client = client
+
+    def analyze(
+        self,
+        capture_result: CaptureResult,
+        market_data_result: MarketQuote,
+        trade_params: Optional[TradeParams] = None,
+    ) -> AgentAnalysisResult:
+        trade_params = trade_params or TradeParams()
+
+        # 1. Input validation -- before any API call, so a bad capture or
+        # a bad market data fetch never costs a Claude request, and the
+        # agent never reasons about data that doesn't actually exist.
+        if capture_result.status != CaptureStatus.SUCCESS:
+            detail = f": {capture_result.error_message}" if capture_result.error_message else "."
+            return self._failed(f"No chart to analyze -- capture status is {capture_result.status.value}{detail}")
+
+        if market_data_result.status != MarketDataStatus.SUCCESS:
+            detail = f": {market_data_result.error_message}" if market_data_result.error_message else "."
+            return self._failed(
+                f"No market data to analyze -- market data status is {market_data_result.status.value}{detail}"
+            )
+
+        try:
+            image_b64, media_type = _load_image_as_base64(capture_result.screenshot_path)
+        except OSError as exc:
+            return self._failed(f"Could not read the screenshot file: {exc}")
+
+        try:
+            system_prompt = SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+            analysis_template = ANALYSIS_PROMPT_PATH.read_text(encoding="utf-8")
+        except OSError as exc:
+            return self._failed(f"Could not read the prompt files: {exc}")
+
+        user_prompt = _render_analysis_prompt(
+            analysis_template, capture_result, market_data_result, trade_params
+        )
+
+        if self._client is not None:
+            client = self._client
+        else:
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+            if not api_key:
+                return self._failed(
+                    "ANTHROPIC_API_KEY is not set in .env. Get one at "
+                    "https://console.anthropic.com/settings/keys."
+                )
+            client = anthropic.Anthropic(api_key=api_key)
+
+        try:
+            response = client.messages.create(
+                model=self._model,
+                max_tokens=DEFAULT_MAX_TOKENS,
+                system=system_prompt,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": image_b64,
+                                },
+                            },
+                            {"type": "text", "text": user_prompt},
+                        ],
+                    }
+                ],
+                timeout=self._timeout_seconds,
+            )
+        except anthropic.APITimeoutError as exc:
+            return self._failed(
+                f"Claude API request timed out after {self._timeout_seconds}s: {exc}"
+            )
+        except anthropic.APIError as exc:
+            # Covers rate limits and every other API-side error -- the
+            # real message is preserved, never replaced with a guess.
+            return self._failed(f"Claude API request failed: {exc}")
+
+        raw_text = _extract_text(response)
+        try:
+            parsed = _parse_response(raw_text)
+        except ValueError as exc:
+            return self._failed(f"Claude's response could not be used: {exc}")
+
+        return AgentAnalysisResult(
+            status=AgentAnalysisStatus.SUCCESS,
+            analysis_text=parsed["analysis_text"],
+            trend_assessment=parsed["trend_assessment"],
+            structure_assessment=parsed["structure_assessment"],
+            setup_assessment=parsed["setup_assessment"],
+            uncertainty=parsed["uncertainty"],
+            timestamp=datetime.now(timezone.utc),
+            error_message=None,
+        )
+
+    def _failed(self, message: str) -> AgentAnalysisResult:
+        return AgentAnalysisResult(
+            status=AgentAnalysisStatus.FAILED,
+            analysis_text=None,
+            trend_assessment=None,
+            structure_assessment=None,
+            setup_assessment=None,
+            uncertainty=None,
+            timestamp=None,
+            error_message=message,
+        )
+
+
+def analyze(
+    capture_result: CaptureResult,
+    market_data_result: MarketQuote,
+    trade_params: Optional[TradeParams] = None,
+    model: Optional[str] = None,
+) -> AgentAnalysisResult:
+    """Convenience wrapper around TradeAgent(model).analyze(...)."""
+    return TradeAgent(model=model).analyze(capture_result, market_data_result, trade_params)

@@ -93,7 +93,31 @@ Without a key set, this fails cleanly (status `FAILED`, `price=None`,
 and a message telling you where to get one) rather than making a request
 at all.
 
+## Trying the agent by hand
+
+Needs a real Anthropic API key (get one at
+https://console.anthropic.com/settings/keys), set in `.env` as
+`ANTHROPIC_API_KEY=your-key-here`. Everything else can stay in DEMO mode
+— this uses the committed demo chart and demo price data:
+
+```bash
+python -c "
+from capture.manager import CaptureManager
+from tools.market_data import MarketDataManager
+from agents.trade_agent import TradeAgent
+
+capture_result = CaptureManager(mode='demo').capture('EURUSD', '1h')
+market_data_result = MarketDataManager(mode='demo').get_quote('EURUSD')
+result = TradeAgent().analyze(capture_result, market_data_result)
+print(result)
+"
+```
+
+Without a key set, this fails cleanly (status `FAILED`, every analysis
+field `None`, and a message pointing at the Anthropic console) rather
+than fabricating an analysis.
+
 ## Status
 
-Milestone 6 of 12: market data tool (LIVE and DEMO providers). See
+Milestone 7 of 12: agent loop with qualitative analysis. See
 [docs/iterations.md](docs/iterations.md).

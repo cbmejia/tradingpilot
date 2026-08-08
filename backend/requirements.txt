@@ -17,3 +17,6 @@ pillow>=10.0
 
 # Milestone 6 — market data (LIVE mode only; DEMO mode needs none of this)
 requests>=2.31
+
+# Milestone 7 — agent loop
+anthropic>=0.40
