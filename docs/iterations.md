@@ -395,6 +395,74 @@ Not wired into the orchestrator or the frontend, and no agent API
 endpoint was added. All 85 tests pass (19 database + 11 API + 17 capture
 + 18 market data + 20 agent).
 
+## Milestone 8 — Deterministic evaluation engine
+
+Built `evals/trade_evaluator.py`'s `evaluate(agent_analysis,
+trade_params) -> EvaluationResult`: five components, 20 points each, 100
+total. Full rubric written out in [docs/rubric.md](rubric.md) — every
+component's source field and exact scoring bands, in a plain table, no
+code-reading required.
+
+- **Deterministic by construction.** No AI call anywhere in the file, no
+  randomness, no clock reads. Four components (Trend, Structure, Entry,
+  Timing/Context) each apply the identical 3-band text rule
+  (`_score_subjective_text`) to one agent field
+  (`trend_assessment`/`structure_assessment`/`setup_assessment`/
+  `analysis_text`): substantive text (≥15 chars, no "can't tell"
+  language) scores 20, thin text scores 10, empty or explicitly negative
+  text scores 0.
+- **Risk/Reward is arithmetic, not a reading of the agent's words.**
+  `_compute_risk_reward()` computes `RR = reward distance / risk
+  distance` from the user's entry/stop/target, honoring direction (LONG:
+  risk = entry − stop, reward = target − entry; SHORT: mirrored). Missing
+  entry/stop/target/direction, a stop or target on the wrong side, or a
+  zero risk distance all return a `FAILED` evaluation with a plain-English
+  reason — never a guessed ratio. Scored 20 (RR ≥ 2.0), 10 (1.0 ≤ RR <
+  2.0), or 0 (RR < 1.0).
+- **`total_score` is always the sum of the five components** — the exact
+  same formula the database's `ck_evaluations_total_score_is_sum_of_
+  components` CHECK constraint enforces. `evaluate()` has no `total_score`
+  parameter at all (confirmed by a test inspecting its signature, same
+  pattern as `crud.add_evaluation`'s Milestone 3 test).
+- **Uncertainty caps the four subjective components, not the total.**
+  `UNCERTAINTY_CAPS = {"LOW": 20, "MEDIUM": 14, "HIGH": 8}`, applied via
+  `min(raw_score, cap)` to each subjective component *before* summing.
+  Risk/Reward is exempt — it's a fact about numbers the user typed, not a
+  reading of an ambiguous chart. Verified the resulting ceilings match
+  exactly what was specified: LOW 100, MEDIUM 76, HIGH 52 (4 × cap + the
+  full 20 from Risk/Reward, which can still score 20 even under HIGH
+  uncertainty — a direct test confirms Risk/Reward's score and ratio are
+  identical across all three uncertainty levels on the same trade
+  params).
+- **A failed agent analysis is never scored.** `evaluate()` checks
+  `agent_analysis.status` first, before even attempting the RR
+  calculation, and returns a `FAILED` evaluation with every score field
+  `None`.
+- `tests/test_evaluation.py` — 26 tests: determinism (same input twice →
+  identical result), total-equals-sum-of-five for all three uncertainty
+  levels, the no-total-parameter signature test, RR computed correctly
+  for both LONG and SHORT, RR's three score bands, four RR failure modes
+  (stop wrong side, target wrong side, zero risk distance, each of
+  direction/entry/stop/target missing individually, and no trade params
+  at all), a failed agent analysis short-circuiting before any scoring,
+  the three subjective-text score bands (substantive/thin/negative
+  phrase) plus empty text, higher-uncertainty-scores-lower on identical
+  input, the three documented ceilings (100/76/52) verified exactly
+  component-by-component, Risk/Reward's invariance across uncertainty
+  levels, and a sanity check that `UNCERTAINTY_CAPS` matches what's
+  documented.
+
+Manually ran one example from the terminal (MEDIUM uncertainty, a LONG
+setup with RR = 2.0): all four subjective components capped from 20 to
+14, Risk/Reward scored the full 20, total 76 — matches the worked example
+in `docs/rubric.md` exactly.
+
+Not wired into the orchestrator or the frontend, and no evaluation API
+endpoint was added. Guardrails (pass/fail thresholds) are explicitly out
+of scope here — this engine scores, it doesn't block; that's Milestone 9.
+All 111 tests pass (19 database + 11 API + 17 capture + 18 market data +
+20 agent + 26 evaluation).
+
 ## Rebuilding the database
 
 `init_db()` only ever adds tables that don't exist yet — it never alters
@@ -424,7 +492,7 @@ isn't forgotten.
 5. ~~Screenshot tool~~
 6. ~~Market-data tool~~
 7. ~~Agent loop~~
-8. Evaluation
+8. ~~Evaluation~~
 9. Guardrails
 10. Human approval
 11. UI (incl. Tailwind migration)

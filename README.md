@@ -28,7 +28,7 @@ what's next.
 - `prompts/` — versioned markdown prompt templates
 - `screenshots/` — captured chart images (`live/` and `demo/`)
 - `logs/` — runtime logs
-- `docs/` — architecture, testing, and iteration notes
+- `docs/` — architecture, the evaluation rubric ([rubric.md](docs/rubric.md)), testing, and iteration notes
 - `tests/` — automated tests
 
 ## Running the backend
@@ -117,7 +117,35 @@ Without a key set, this fails cleanly (status `FAILED`, every analysis
 field `None`, and a message pointing at the Anthropic console) rather
 than fabricating an analysis.
 
+## Scoring an evaluation by hand
+
+Pure computation — no network, no API key needed at all:
+
+```bash
+python -c "
+from datetime import datetime, timezone
+from agents.trade_agent import AgentAnalysisResult, AgentAnalysisStatus, TradeParams
+from evals.trade_evaluator import evaluate
+
+analysis = AgentAnalysisResult(
+    status=AgentAnalysisStatus.SUCCESS,
+    analysis_text='Price has been grinding higher against a rising trendline with clean structure.',
+    trend_assessment='Uptrend with a clear series of higher highs and higher lows.',
+    structure_assessment='Stair-step structure, minimal overlap between recent candles.',
+    setup_assessment='Pullback to the trendline, holding as support, a readable entry point.',
+    uncertainty='MEDIUM',
+    timestamp=datetime.now(timezone.utc),
+    error_message=None,
+)
+params = TradeParams(direction='long', entry=1.0950, stop=1.0900, target=1.1050)
+print(evaluate(analysis, params))
+"
+```
+
+See [docs/rubric.md](docs/rubric.md) for the full scoring table and the
+same example worked out by hand.
+
 ## Status
 
-Milestone 7 of 12: agent loop with qualitative analysis. See
+Milestone 8 of 12: deterministic evaluation engine. See
 [docs/iterations.md](docs/iterations.md).

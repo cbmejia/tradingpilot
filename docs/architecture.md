@@ -42,7 +42,7 @@ These are structural, not configurable:
 | Screenshot tool | `capture/` | Captures a timestamped chart image. See "Screenshot capture design" below. (Originally planned as `tools/tradingview_capture.py`; moved to its own `capture/` package in Milestone 5 — that file now just points here.) |
 | Market data tool | `tools/market_data.py` | Fetches a structured market snapshot for the selected symbol. Same LIVE/DEMO split as the screenshot tool. |
 | Economic calendar tool | `tools/economic_calendar.py` | Contextual input for later; not wired into the workflow yet. |
-| Evaluation engine | `evals/trade_evaluator.py` | Pure, deterministic function: agent output + market data + trade params → a rubric score with a component breakdown. No LLM call inside it. |
+| Evaluation engine | `evals/trade_evaluator.py` | Pure, deterministic function: agent output + trade params → a rubric score with a component breakdown. No LLM call inside it. See "Evaluation engine design" below and [docs/rubric.md](rubric.md) for the full rubric. |
 | Guardrails | `guardrails/rules.py` | Deterministic checks (RR, freshness, input validity, confidence). Returns PASS / REQUIRES_REVIEW / BLOCKED with reasons. |
 | Database | `database/` | SQLAlchemy models and session management for the audit trail. Schema is defined in Milestone 3 — this milestone only sets up the package. |
 | Logs | `logs/` | Operational logs (step timing, tool errors). Separate from the audit trail, which lives in the database. |
@@ -189,6 +189,37 @@ explicitly instruct the model to prefer `HIGH` uncertainty and honest
 phrase anything as an instruction to buy, sell, or otherwise place a
 trade — consistent with this app never executing trades under any
 circumstances.
+
+## Evaluation engine design
+
+`evals/trade_evaluator.py`'s `evaluate(agent_analysis, trade_params) ->
+EvaluationResult` is a pure function: no AI call, no randomness, no
+clock-dependent behavior. Same inputs always produce the same five
+component scores and the same total. The full rubric — exactly what each
+component reads and what earns 20 vs. 10 vs. 0 — is written out in
+[docs/rubric.md](rubric.md); the short version:
+
+- **Trend, Structure, Entry, Timing/Context** each read one qualitative
+  field from the agent's analysis (`trend_assessment`,
+  `structure_assessment`, `setup_assessment`, `analysis_text`
+  respectively) and score it 0/10/20 by the same rule: substantive text
+  scores 20, thin text scores 10, empty or explicitly "can't tell" text
+  scores 0.
+- **Risk/Reward** is computed arithmetically from the user's
+  entry/stop/target — it never reads the agent's words at all. Missing
+  or incoherent trade parameters (stop on the wrong side, zero risk
+  distance) return a `FAILED` evaluation rather than a guessed ratio.
+- The agent's `uncertainty` caps the four *subjective* components (not
+  Risk/Reward) at 20/14/8 for LOW/MEDIUM/HIGH, applied per-component
+  before summing — never as a post-hoc adjustment to the total, since
+  the database's `CHECK` constraint requires `total_score` to exactly
+  equal the sum of the five components.
+- If the agent analysis itself failed, the evaluator returns a `FAILED`
+  evaluation immediately and scores nothing.
+
+This engine only scores — it does not decide pass/fail. Thresholds for
+what score (combined with data freshness, RR minimums, and confidence)
+is good enough to recommend are Milestone 9's guardrails, not this file.
 
 ## Data flow (per run)
 
