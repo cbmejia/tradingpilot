@@ -131,10 +131,7 @@ path for demonstrations, grading, and any automated testing.
 (`MarketDataProvider.get_quote(symbol) -> MarketQuote`), a `LIVE`
 provider and a `DEMO` provider, and a `MarketDataManager` that picks
 between them via `MARKET_DATA_MODE` and never falls back from one to the
-other. `MarketQuote` carries `price` and `timestamp` — and `timestamp` is
-always the time the *source* says the quote is from, never the time the
-tool happened to ask for it, because the data-freshness guardrail
-(Milestone 9) needs to know how old the data genuinely is.
+other. `MarketQuote` carries `price` and `timestamp`.
 
 **The single rule this tool cannot break:** if the source is unreachable,
 times out, doesn't recognize the symbol, or sends back something that
@@ -148,13 +145,24 @@ guardrails simultaneously, while still looking legitimate.
   require a free signup for an API key (`MARKET_DATA_API_KEY` in `.env`).
   Chosen over no-signup alternatives (e.g. Frankfurter) because it
   reports an actual quote timestamp rather than a once-daily reference
-  rate — this project needs to know how old a quote is, not just what it
-  was as of some unspecified point today.
-- **DEMO mode** — `DemoMarketDataProvider`: reads fixed quotes from
-  `tools/demo_market_data.json`, each with its own fixed (non-"now")
-  timestamp, marked with `source="demo_fixture"`. No network access. An
+  rate. `timestamp` is always the time the *source* says the quote is
+  from, never the time the tool happened to ask for it, because the
+  data-freshness guardrail (Milestone 9) needs to know how old the data
+  genuinely is.
+- **DEMO mode** — `DemoMarketDataProvider`: reads a fixed, deterministic
+  `price` from `tools/demo_market_data.json` (same value every call),
+  marked with `source="demo_fixture"`. No network access. An
   unrecognized symbol fails clearly rather than substituting another
-  pair's price.
+  pair's price. **`timestamp` is a deliberate exception to the
+  "source time, never fetch time" rule above:** it's generated fresh
+  (`datetime.now(utc)`) on every call, not read from the fixture. A
+  Milestone 9 hardening pass found that a fixed historical timestamp
+  made every demo quote instantly stale, so `MARKET_DATA_FRESH` blocked
+  every demo run before a human ever saw it — even though `SYNTHETIC_DATA`
+  already guarantees a demo run can never reach `READY_FOR_REVIEW`
+  on its own. The freshness guardrail was not weakened to fix this; only
+  the demo provider changed. See the "Milestone 9 fix" entry in
+  `docs/iterations.md`.
 
 ## Agent design
 

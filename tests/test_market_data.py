@@ -38,12 +38,25 @@ def test_demo_fetch_succeeds_for_known_symbol():
     assert result.error_message is None
 
 
-def test_demo_fetch_is_deterministic():
+def test_demo_fetch_price_is_deterministic_across_calls():
+    """
+    The price is fixed/deterministic -- same value every call. The
+    timestamp deliberately is NOT: it's generated fresh at fetch time
+    (see DemoMarketDataProvider's docstring) so a demo run stays
+    reviewable instead of aging into a stale, BLOCKED one.
+    """
     first = DemoMarketDataProvider().get_quote("EURUSD")
     second = DemoMarketDataProvider().get_quote("EURUSD")
 
-    assert first.price == second.price
-    assert first.timestamp == second.timestamp
+    assert first.price == second.price == 1.0921
+
+
+def test_demo_fetch_timestamp_is_generated_fresh_at_fetch_time():
+    before = datetime.now(timezone.utc)
+    result = DemoMarketDataProvider().get_quote("EURUSD")
+    after = datetime.now(timezone.utc)
+
+    assert before <= result.timestamp <= after
 
 
 def test_demo_fetch_unknown_symbol_fails_cleanly_without_substituting_a_price():

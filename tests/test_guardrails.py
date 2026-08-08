@@ -8,9 +8,10 @@ from datetime import datetime, timedelta, timezone
 
 from agents.trade_agent import AgentAnalysisResult, AgentAnalysisStatus, TradeParams
 from capture.base import CaptureMode, CaptureResult, CaptureStatus
+from capture.demo_provider import DemoProvider
 from evals.trade_evaluator import EvaluationResult, EvaluationStatus, evaluate
 from guardrails.rules import GuardrailOutcome, evaluate_guardrails
-from tools.market_data import MarketDataMode, MarketDataStatus, MarketQuote
+from tools.market_data import DemoMarketDataProvider, MarketDataMode, MarketDataStatus, MarketQuote
 
 NOW = datetime(2026, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
 
@@ -523,3 +524,102 @@ def test_determinism_holds_for_a_blocked_scenario_too():
 
     assert first == second
     assert first.outcome == GuardrailOutcome.BLOCKED
+
+
+# ---------------------------------------------------------------------------
+# Milestone 9 fix: a real DEMO run must reach REQUIRES_REVIEW, never
+# BLOCKED and never READY_FOR_REVIEW. Uses the REAL DemoProvider and
+# DemoMarketDataProvider (not the hand-built _fresh_* fixtures above) so
+# this actually exercises the fixed timestamp-generation code, not just
+# a fixture that happens to look fresh.
+# ---------------------------------------------------------------------------
+
+
+def test_real_demo_market_data_fetch_passes_market_data_fresh():
+    capture, _m, analysis, _e, params = _perfect_run()
+    real_demo_market_data = DemoMarketDataProvider().get_quote("EURUSD")
+    assert real_demo_market_data.status == MarketDataStatus.SUCCESS  # sanity check
+    evaluation = evaluate(analysis, params)
+
+    report = evaluate_guardrails(
+        capture, real_demo_market_data, analysis, evaluation, params, now=datetime.now(timezone.utc)
+    )
+
+    assert _checks_by_name(report)["MARKET_DATA_FRESH"].passed is True
+
+
+def test_real_demo_capture_passes_capture_fresh():
+    _c, market_data, analysis, _e, params = _perfect_run()
+    real_demo_capture = DemoProvider().capture("EURUSD", "1h")
+    assert real_demo_capture.status == CaptureStatus.SUCCESS  # sanity check
+    evaluation = evaluate(analysis, params)
+
+    report = evaluate_guardrails(
+        real_demo_capture, market_data, analysis, evaluation, params, now=datetime.now(timezone.utc)
+    )
+
+    assert _checks_by_name(report)["CAPTURE_FRESH"].passed is True
+
+
+def test_full_real_demo_run_reaches_requires_review_with_synthetic_data_as_the_reason():
+    """
+    The actual regression this fix closes: a complete DEMO-mode run
+    (real DemoProvider + real DemoMarketDataProvider, not hand-built
+    fixtures), with an otherwise-perfect agent analysis, must land on
+    REQUIRES_REVIEW -- never BLOCKED (the bug: MARKET_DATA_FRESH used to
+    fail on the fixture's fixed 2024 timestamp) and never READY_FOR_REVIEW
+    (SYNTHETIC_DATA must still catch it). SYNTHETIC_DATA must be the
+    *only* failing rule.
+    """
+    # `now` is captured AFTER both provider calls, not before -- capture()
+    # and get_quote() each generate their own datetime.now(utc) a moment
+    # later than any "now" captured earlier would be, which would make
+    # captured_at/timestamp look like they're from the future relative to
+    # an earlier "now" and trip the (correct, intentional) "timestamp is
+    # in the future" rejection. Real callers don't have this problem --
+    # they compute `now` once, right before checking, same as here.
+    demo_capture = DemoProvider().capture("EURUSD", "1h")
+    demo_market_data = DemoMarketDataProvider().get_quote("EURUSD")
+    now = datetime.now(timezone.utc)
+    analysis = _good_analysis(timestamp=now)
+    params = _long_params()
+    evaluation = evaluate(analysis, params)
+    assert evaluation.total_score == 100  # a genuinely perfect score
+
+    report = evaluate_guardrails(demo_capture, demo_market_data, analysis, evaluation, params, now=now)
+
+    assert report.outcome == GuardrailOutcome.REQUIRES_REVIEW
+    checks = _checks_by_name(report)
+    failing = [c.name for c in report.checks if not c.passed]
+    assert failing == ["SYNTHETIC_DATA"]
+    assert checks["MARKET_DATA_FRESH"].passed is True
+    assert checks["CAPTURE_FRESH"].passed is True
+
+
+def test_full_real_demo_run_never_reaches_ready_for_review():
+    demo_capture = DemoProvider().capture("EURUSD", "1h")
+    demo_market_data = DemoMarketDataProvider().get_quote("EURUSD")
+    now = datetime.now(timezone.utc)
+    analysis = _good_analysis(timestamp=now)
+    params = _long_params()
+    evaluation = evaluate(analysis, params)
+
+    report = evaluate_guardrails(demo_capture, demo_market_data, analysis, evaluation, params, now=now)
+
+    assert report.outcome != GuardrailOutcome.READY_FOR_REVIEW
+    assert report.outcome != GuardrailOutcome.BLOCKED
+
+
+def test_genuinely_stale_live_quote_still_blocks_freshness_not_weakened():
+    """Confirms today's fix is scoped to the demo provider only -- LIVE
+    freshness enforcement is exactly as strict as it was before."""
+    capture, _m, analysis, _e, params = _perfect_run()
+    stale_live_market_data = _fresh_market_data(
+        mode=MarketDataMode.LIVE, timestamp=NOW - timedelta(hours=3)
+    )
+    evaluation = evaluate(analysis, params)
+
+    report = evaluate_guardrails(capture, stale_live_market_data, analysis, evaluation, params, now=NOW)
+
+    assert _checks_by_name(report)["MARKET_DATA_FRESH"].passed is False
+    assert report.outcome == GuardrailOutcome.BLOCKED

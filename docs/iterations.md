@@ -629,6 +629,90 @@ Not wired into the orchestrator or the frontend, and no guardrails API
 endpoint was added. All 153 tests pass (19 database + 11 API + 17
 capture + 18 market data + 25 agent + 32 evaluation + 31 guardrails).
 
+## Milestone 9 fix — demo market data was instantly stale, blocking every demo run
+
+**The bug.** `DemoMarketDataProvider` read its quote `timestamp` straight
+from `tools/demo_market_data.json` — a fixed `2024-01-15` value. Every
+demo run's age relative to "now" was therefore roughly two years,
+enormously over `MARKET_DATA_MAX_AGE_SECONDS` (900s). `MARKET_DATA_FRESH`
+is a **blocking** rule, and blocking rules force `BLOCKED` outright,
+overriding everything else — including `SYNTHETIC_DATA`, a
+review-forcing rule that never even got the chance to be the "reason" a
+demo run needed review, because the run was already blocked before
+outcome-derivation got that far. In effect, DEMO mode could never
+produce a reviewable run at all — a real problem, since Milestones 10
+and 11 build a human-review screen that gets demonstrated in DEMO mode.
+
+**Root cause check on the capture side too, per the fix request.**
+`capture/demo_provider.py`'s `DemoProvider.capture()` was already setting
+`captured_at=datetime.now(timezone.utc)` at capture time (not read from
+a fixture) — confirmed by inspection and by a new test exercising the
+real provider — so `CAPTURE_FRESH` was never actually broken. Only the
+market-data side had the bug.
+
+**The fix.** `DemoMarketDataProvider.get_quote()` now sets `timestamp =
+datetime.now(timezone.utc)` at fetch time, same as the capture provider
+always did — documented explicitly as a deliberate demo affordance, both
+in the provider's own docstring and in `docs/architecture.md`. The
+`price` stays exactly as fixed and deterministic as before (read from
+`tools/demo_market_data.json`, unchanged value every call) — only the
+timestamp became relative. The now-unused `"timestamp"` key was removed
+from the fixture JSON rather than left as dead, misleading data.
+`source="demo_fixture"` still marks every demo quote unmistakably as
+sample data — unchanged.
+
+**The guardrail itself was not touched.** No special-casing for `DEMO`
+was added to `MARKET_DATA_FRESH`, `CAPTURE_FRESH`, or anywhere else in
+`guardrails/rules.py`. Freshness stays exactly as strict for LIVE data as
+it was — confirmed by a test that a genuinely stale LIVE quote (3 hours
+old, hand-constructed, not touching the demo provider at all) still
+`BLOCKS`, unchanged.
+
+**Result, confirmed against the real providers (not hand-built
+fixtures):** a full DEMO run — real `DemoProvider`, real
+`DemoMarketDataProvider`, an otherwise-perfect agent analysis, a perfect
+100 score — now lands on `REQUIRES_REVIEW`, with `SYNTHETIC_DATA` as the
+**only** failing rule; `CAPTURE_FRESH` and `MARKET_DATA_FRESH` both pass.
+Verified by hand from the terminal too (see README) — the real output
+shows exactly that breakdown.
+
+- `tools/market_data.py` — `DemoMarketDataProvider.get_quote()` fixed;
+  module and `MarketQuote` docstrings updated to state the DEMO timestamp
+  exception explicitly rather than leaving the "source time, never fetch
+  time" rule looking unconditional.
+- `tools/demo_market_data.json` — `"timestamp"` key removed (unused now).
+- `tests/test_market_data.py` — `test_demo_fetch_is_deterministic`
+  (which asserted timestamp *equality* across calls — no longer true by
+  design) replaced with `test_demo_fetch_price_is_deterministic_across_
+  calls` (price only) and `test_demo_fetch_timestamp_is_generated_fresh_
+  at_fetch_time` (timestamp falls between two `datetime.now()` calls
+  bracketing the fetch).
+- `tests/test_guardrails.py` — 5 tests added using the **real**
+  `DemoProvider`/`DemoMarketDataProvider` (not the hand-built `_fresh_*`
+  fixtures the rest of the file uses): demo market data passes
+  `MARKET_DATA_FRESH`, demo capture passes `CAPTURE_FRESH`, a full real
+  DEMO run reaches `REQUIRES_REVIEW` with `SYNTHETIC_DATA` as the sole
+  failing rule, a full real DEMO run never reaches `READY_FOR_REVIEW`,
+  and a genuinely stale LIVE quote still `BLOCKS`.
+- **A real bug surfaced and fixed during this work, in the tests
+  themselves, not the product code:** two of the new tests initially
+  computed `now` *before* calling the real providers, and both `capture()`
+  and `get_quote()` generate their own `datetime.now(utc)` a moment
+  later — occasionally landing microseconds after the test's `now`,
+  which made the guardrail's (correct, intentional) "timestamp is in the
+  future" rejection fire and turned the expected `REQUIRES_REVIEW` into
+  `BLOCKED`. It didn't reproduce when those two test files were run
+  alone, only inside the full suite — a genuine timing race, not a
+  product defect. Fixed by computing `now` *after* the provider calls,
+  matching how a real caller would do it.
+- `evals/trade_evaluator.py` — untouched by this fix (mentioned only
+  because `evaluate()` is used throughout the new tests to build a real
+  `EvaluationResult` from the real demo analysis).
+
+All 159 tests pass (19 database + 11 API + 17 capture + 19 market data +
+25 agent + 32 evaluation + 36 guardrails), confirmed stable across three
+consecutive full-suite runs after the timing-race fix.
+
 ## Rebuilding the database
 
 `init_db()` only ever adds tables that don't exist yet — it never alters

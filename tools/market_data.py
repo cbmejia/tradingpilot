@@ -54,11 +54,17 @@ class MarketQuote:
     """
     What every quote attempt returns, success or failure alike.
 
-    timestamp is the time the SOURCE says the quote is from -- not the
-    time we happened to ask for it. Those are deliberately kept as one
-    field, always sourced from the provider's own data, never from
-    datetime.now(): the future staleness guardrail (Milestone 9) needs to
-    know how old the DATA is, and "now" would silently hide that.
+    For LIVE quotes, timestamp is the time the SOURCE says the quote is
+    from -- never datetime.now() at fetch time -- so the freshness
+    guardrail (Milestone 9) knows how old the DATA genuinely is, not how
+    recently it was asked for.
+
+    DEMO is a deliberate, documented exception: DemoMarketDataProvider
+    sets timestamp to datetime.now(utc) at fetch time so a demo run is
+    always fresh enough to be reviewable (see its docstring). The price
+    stays fixed either way -- only a LIVE timestamp claims to be "when
+    the source last quoted this," and `source` always says which kind of
+    quote this is.
     """
 
     mode: MarketDataMode
@@ -85,6 +91,21 @@ class MarketDataProvider(ABC):
 
 
 class DemoMarketDataProvider(MarketDataProvider):
+    """
+    DELIBERATE DEMO AFFORDANCE: the price is fixed and deterministic
+    (read from tools/demo_market_data.json, same value every call), but
+    the quote TIMESTAMP is generated at fetch time (datetime.now(utc)),
+    not read from the fixture. A demo run needs to be reviewable -- if
+    the timestamp were pinned to a fixed date, it would age indefinitely
+    and every demo quote would eventually (in practice, immediately) fail
+    the MARKET_DATA_FRESH guardrail and BLOCK the run before a human ever
+    saw it, even though SYNTHETIC_DATA already guarantees a demo run can
+    never reach READY_FOR_REVIEW on its own. Freshness staying real and
+    strict for LIVE data was non-negotiable, so the fix lives here, in
+    the provider that's allowed to be generous about itself -- not in the
+    guardrail, which stays exactly as strict for everyone.
+    """
+
     def __init__(self, fixture_path: Path = DEMO_FIXTURE_PATH):
         self._fixture_path = fixture_path
 
@@ -109,9 +130,6 @@ class DemoMarketDataProvider(MarketDataProvider):
 
         try:
             price = float(entry["price"])
-            timestamp = datetime.fromisoformat(entry["timestamp"])
-            if timestamp.tzinfo is None:
-                raise ValueError("fixture timestamp has no UTC offset")
         except (KeyError, TypeError, ValueError) as exc:
             return self._failed(symbol, f"Demo fixture for {symbol} is malformed: {exc}")
 
@@ -119,7 +137,7 @@ class DemoMarketDataProvider(MarketDataProvider):
             mode=MarketDataMode.DEMO,
             symbol=symbol,
             price=price,
-            timestamp=timestamp.astimezone(timezone.utc),
+            timestamp=datetime.now(timezone.utc),
             source="demo_fixture",
             status=MarketDataStatus.SUCCESS,
             error_message=None,
