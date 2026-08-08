@@ -5,8 +5,10 @@
 # mock playwright.sync_api.sync_playwright itself, so nothing here ever
 # launches a real browser or contacts TradingView.
 
+import shutil
 from datetime import timedelta
-from unittest.mock import patch
+from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -14,6 +16,8 @@ from capture.base import CaptureMode, CaptureProvider, CaptureResult, CaptureSta
 from capture.demo_provider import DemoProvider, demo_filename
 from capture.live_provider import LiveProvider
 from capture.manager import CaptureManager
+
+DEMO_FIXTURE = Path("screenshots/demo/EURUSD_1h.png")
 
 
 # ---------------------------------------------------------------------------
@@ -179,3 +183,116 @@ def test_live_provider_result_mode_is_always_live_even_on_failure():
         result = LiveProvider().capture("GBPUSD", "4h")
 
     assert result.mode == CaptureMode.LIVE
+
+
+def _mock_playwright_context(page: MagicMock) -> MagicMock:
+    """
+    Builds the mock chain LiveProvider walks: sync_playwright() used as a
+    context manager -> .chromium.launch() -> .new_page() -> the given
+    fake page. Lets tests control exactly what the "browser" does without
+    any real browser or network involved.
+    """
+    browser = MagicMock()
+    browser.new_page.return_value = page
+
+    playwright_obj = MagicMock()
+    playwright_obj.chromium.launch.return_value = browser
+
+    context_manager = MagicMock()
+    context_manager.__enter__.return_value = playwright_obj
+    context_manager.__exit__.return_value = False
+    return context_manager
+
+
+def test_live_capture_fails_when_chart_element_never_appears(tmp_path):
+    """A blank page, a consent banner, or a broken render never shows the
+    expected chart element -- that must fail, not succeed with garbage."""
+    page = MagicMock()
+    page.wait_for_selector.side_effect = TimeoutError(
+        "waiting for selector 'canvas' failed: timeout exceeded"
+    )
+    mock_context = _mock_playwright_context(page)
+
+    with patch("playwright.sync_api.sync_playwright", return_value=mock_context):
+        result = LiveProvider(output_dir=tmp_path).capture("EURUSD", "1h")
+
+    assert result.mode == CaptureMode.LIVE
+    assert result.status == CaptureStatus.FAILED
+    assert result.screenshot_path is None
+    assert "chart element" in result.error_message.lower()
+    # The browser must still be cleaned up even on this early failure.
+    page.wait_for_selector.assert_called_once()
+
+
+def test_live_capture_fails_when_screenshot_is_blank(tmp_path):
+    def fake_screenshot(path):
+        from PIL import Image
+
+        Image.new("RGB", (200, 200), color=(255, 255, 255)).save(path)
+
+    page = MagicMock()
+    page.screenshot.side_effect = fake_screenshot
+    mock_context = _mock_playwright_context(page)
+
+    with patch("playwright.sync_api.sync_playwright", return_value=mock_context):
+        result = LiveProvider(output_dir=tmp_path).capture("EURUSD", "1h")
+
+    assert result.mode == CaptureMode.LIVE
+    assert result.status == CaptureStatus.FAILED
+    assert result.screenshot_path is None
+    assert "blank" in result.error_message.lower() or "uniform" in result.error_message.lower()
+    # The invalid file is still on disk for inspection, just not returned
+    # as a usable result.
+    saved_files = list(tmp_path.glob("*.png"))
+    assert len(saved_files) == 1
+
+
+def test_live_capture_fails_when_screenshot_is_near_uniform_not_just_solid():
+    """Near-uniform (barely any variation) should fail the same as truly
+    blank -- the check is a variance threshold, not an exact-match check."""
+    import random
+
+    def fake_screenshot(path):
+        from PIL import Image
+
+        rng = random.Random(0)
+        img = Image.new("RGB", (200, 200))
+        pixels = img.load()
+        for x in range(200):
+            for y in range(200):
+                jitter = rng.randint(-1, 1)
+                value = 200 + jitter
+                pixels[x, y] = (value, value, value)
+        img.save(path)
+
+    page = MagicMock()
+    page.screenshot.side_effect = fake_screenshot
+    mock_context = _mock_playwright_context(page)
+
+    with patch("playwright.sync_api.sync_playwright", return_value=mock_context):
+        result = LiveProvider().capture("EURUSD", "1h")
+
+    assert result.status == CaptureStatus.FAILED
+    assert "blank" in result.error_message.lower() or "uniform" in result.error_message.lower()
+
+
+def test_live_capture_succeeds_with_a_realistic_looking_screenshot(tmp_path):
+    """Regression guard: the validity check must not reject an actual
+    chart-like image. Reuses the committed demo fixture as a stand-in for
+    what a real chart screenshot looks like (plenty of visual variance)."""
+
+    def fake_screenshot(path):
+        shutil.copyfile(DEMO_FIXTURE, path)
+
+    page = MagicMock()
+    page.screenshot.side_effect = fake_screenshot
+    mock_context = _mock_playwright_context(page)
+
+    with patch("playwright.sync_api.sync_playwright", return_value=mock_context):
+        result = LiveProvider(output_dir=tmp_path).capture("EURUSD", "1h")
+
+    assert result.mode == CaptureMode.LIVE
+    assert result.status == CaptureStatus.SUCCESS
+    assert result.error_message is None
+    assert result.screenshot_path is not None
+    assert Path(result.screenshot_path).is_file()

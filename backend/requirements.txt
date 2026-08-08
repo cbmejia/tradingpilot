@@ -13,3 +13,4 @@ httpx>=0.27
 
 # Milestone 5 — chart capture (LIVE mode only; DEMO mode needs none of this)
 playwright>=1.40
+pillow>=10.0

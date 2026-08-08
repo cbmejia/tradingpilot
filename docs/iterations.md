@@ -224,6 +224,35 @@ capture API endpoint was added — this tool is standalone and callable on
 its own, exactly as instructed. All 43 tests pass (19 database + 11 API +
 13 capture).
 
+## Milestone 5 follow-up — LiveProvider validity check
+
+Closed a real gap: `LiveProvider` reported `SUCCESS` for any screenshot at
+all, including a blank page, a cookie/consent banner, or a broken render
+— none of which are an actual chart.
+
+- `capture/live_provider.py` — before `page.screenshot()`, waits for a
+  `canvas` element (configurable via `chart_selector`) to actually appear;
+  if it never does, returns `FAILED` with a clear message instead of
+  screenshotting whatever's there. After the screenshot, a new
+  `screenshot_is_valid()` check opens the image (Pillow), converts to
+  grayscale, and rejects it if the pixel-brightness standard deviation is
+  below a threshold (default 3.0) — a blank or near-uniform image has
+  almost no variance; a real chart (candles, gridlines, text) always has
+  much more. Either check failing returns `FAILED`, never `SUCCESS`, and
+  never a demo image — the invalid file stays on disk (for inspection)
+  but `screenshot_path` in the result is `None`, same as any other
+  failure.
+- Pillow added to `backend/requirements.txt` as a real dependency now
+  (previously only used transiently to generate the demo fixtures). It's
+  imported lazily inside the validity check, so DEMO mode still needs
+  zero extra installs.
+- `tests/test_capture.py` — 4 tests added (17 total, up from 13): missing
+  chart element, a truly blank screenshot, a near-uniform (not just
+  solid-color) screenshot, and a regression guard confirming a
+  realistic-looking screenshot (the committed demo fixture, reused as a
+  stand-in) still passes. All four mock Playwright's browser/page objects
+  directly — no real browser, no network.
+
 ## Rebuilding the database
 
 `init_db()` only ever adds tables that don't exist yet — it never alters
