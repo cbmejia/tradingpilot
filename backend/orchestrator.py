@@ -44,17 +44,41 @@
 # way, for the same reason it always has: a structured row says "what,"
 # the audit trail says "when, in what order, alongside what else."
 #
-# Still a known, open gap, NOT addressed by this fix (out of its scope):
-# agent_analyses has no columns for the five categorical fields the agent
-# produces (trend_direction, trend_quality, structure_quality,
-# setup_quality, context_risk) -- a gap from the Milestone 8 revision.
-# A successful analysis's audit-event text remains the only place those
-# five values are visible after the fact. See docs/iterations.md's
-# Milestone 10.5 fix entry.
+# Milestone 8's gap (agent_analyses' missing categorical columns) was
+# closed by Milestone 10.5 fix 2; see docs/iterations.md for the full
+# history.
+#
+# Milestone 12 — force_scenario, a testing-only affordance:
+# POST /runs/{run_id}/analyze accepts an optional force_scenario query
+# parameter (backend/api/routes_runs.py), gated behind
+# TESTING_CONTROLS_ENABLED (off by default -- see backend/config.py).
+# When set, run_pipeline() deliberately substitutes a synthetic result
+# for exactly one stage -- a real, honest FAILED result shaped identically
+# to what that stage would produce on a genuine failure, an artificially
+# aged timestamp on an otherwise-real successful result, or a synthetic
+# SUCCESS analysis whose prose says plainly it's synthetic -- so every
+# guardrail can be proven against a real, reproducible, screenshottable
+# run instead of only asserted in a unit test. See docs/failure_modes.md
+# for the full scenario list and docs/iterations.md's Milestone 12 entry
+# for the design reasoning.
+#
+# THE HARD RULE THIS MECHANISM FOLLOWS: it only ever fabricates a
+# STAGE'S INPUT to the next stage (a capture result, a quote, an agent
+# analysis) -- never a score, never a guardrail verdict, never the
+# outcome itself. Evaluation and guardrails always run for real, on
+# whatever result (real or forced) the earlier stages produced. A forced
+# "perfect" run still has its 100 computed by the real evaluator from
+# synthetic-but-realistic categorical fields, not a hardcoded 100 --
+# proving the SYNTHETIC_DATA guardrail actually catches it, rather than
+# asserting a fabricated outcome. Every forced run is marked unmistakably
+# in its own audit trail (a testing_scenario_forced event, first thing
+# written) and every synthetic value's text says "TESTING" plainly, so
+# it can never be mistaken for a real result after the fact.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import dataclasses
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -67,6 +91,69 @@ from database.models import Run
 from evals.trade_evaluator import EvaluationResult, EvaluationStatus, evaluate
 from guardrails.rules import evaluate_guardrails
 from tools.market_data import MarketDataManager, MarketDataStatus, MarketQuote
+
+# The only values force_scenario ever accepts. Validated again in
+# backend/api/routes_runs.py (a clean 422 before this function is even
+# called) and here (defense in depth, same pattern as every other
+# validated value in this codebase).
+FORCE_SCENARIOS: frozenset[str] = frozenset(
+    {
+        "capture_fails",
+        "capture_stale",
+        "market_data_fails",
+        "market_data_stale",
+        "agent_fails",
+        "high_uncertainty",
+        "perfect_demo_score",
+    }
+)
+
+# How far in the past a "stale" forced timestamp is set -- comfortably
+# past any sane CAPTURE_MAX_AGE_SECONDS/MARKET_DATA_MAX_AGE_SECONDS
+# (defaults 300s/900s), so the freshness guardrail fails regardless of
+# local threshold tuning. Matches the "2-hour-old" example already used
+# in README.md's hand-run guardrails walkthrough.
+_STALE_AGE = timedelta(hours=2)
+
+# The categorical profile a synthetic SUCCESS agent result uses for each
+# forced scenario that needs the agent to have "succeeded" upstream of
+# it. Never used to fabricate a score directly -- evals/trade_evaluator.py
+# still computes the real score from these fields, same as it would from
+# a real agent response.
+_SYNTHETIC_AGENT_PROFILES: dict[str, dict[str, str]] = {
+    "capture_stale": {
+        "uncertainty": "MEDIUM",
+        "trend_direction": "UP",
+        "trend_quality": "STRONG",
+        "structure_quality": "CLEAN",
+        "setup_quality": "ACCEPTABLE",
+        "context_risk": "LOW",
+    },
+    "market_data_stale": {
+        "uncertainty": "MEDIUM",
+        "trend_direction": "UP",
+        "trend_quality": "STRONG",
+        "structure_quality": "CLEAN",
+        "setup_quality": "ACCEPTABLE",
+        "context_risk": "LOW",
+    },
+    "high_uncertainty": {
+        "uncertainty": "HIGH",
+        "trend_direction": "UP",
+        "trend_quality": "STRONG",
+        "structure_quality": "CLEAN",
+        "setup_quality": "ACCEPTABLE",
+        "context_risk": "LOW",
+    },
+    "perfect_demo_score": {
+        "uncertainty": "LOW",
+        "trend_direction": "UP",
+        "trend_quality": "STRONG",
+        "structure_quality": "CLEAN",
+        "setup_quality": "TEXTBOOK",
+        "context_risk": "LOW",
+    },
+}
 
 
 class RunAlreadyAnalyzedError(Exception):
@@ -129,6 +216,96 @@ def _skipped_evaluation_result(reason: str) -> EvaluationResult:
     )
 
 
+def _forced_failed_capture(mode, symbol: str, timeframe: str, force_scenario: str) -> CaptureResult:
+    """A synthetic FAILED capture, shaped exactly like a real one --
+    labeled with the real configured mode (so the UI's DEMO/LIVE badge
+    stays accurate) and an error message that says plainly this was a
+    deliberate test, not a genuine capture failure."""
+    return CaptureResult(
+        mode=mode,
+        symbol=symbol,
+        timeframe=timeframe,
+        screenshot_path=None,
+        captured_at=None,
+        status=CaptureStatus.FAILED,
+        error_message=(
+            f"TESTING: capture deliberately forced to fail (force_scenario={force_scenario!r}) "
+            f"for guardrail verification. This is not a real capture failure."
+        ),
+    )
+
+
+def _forced_failed_market_data(mode, symbol: str, force_scenario: str) -> MarketQuote:
+    """Same idea as _forced_failed_capture, for market data."""
+    return MarketQuote(
+        mode=mode,
+        symbol=symbol,
+        price=None,
+        timestamp=None,
+        source="testing_forced_failure",
+        status=MarketDataStatus.FAILED,
+        error_message=(
+            f"TESTING: market data fetch deliberately forced to fail "
+            f"(force_scenario={force_scenario!r}) for guardrail verification. "
+            f"This is not a real fetch failure."
+        ),
+    )
+
+
+def _forced_agent_result(force_scenario: str) -> AgentAnalysisResult:
+    """
+    Builds the agent's result for a forced test scenario -- never a real
+    Claude call, so this is free and fully deterministic. Two shapes
+    only: a FAILED result (force_scenario == "agent_fails") shaped
+    exactly like a real failure, or a SUCCESS result built from
+    _SYNTHETIC_AGENT_PROFILES whose every prose field says plainly it's
+    synthetic. Either way, the *score* that comes out of this is still
+    computed for real by evals/trade_evaluator.py from these categorical
+    fields -- this function only ever fabricates the agent's input to the
+    scorer, never the score itself.
+    """
+    if force_scenario == "agent_fails":
+        return AgentAnalysisResult(
+            status=AgentAnalysisStatus.FAILED,
+            analysis_text=None,
+            trend_assessment=None,
+            structure_assessment=None,
+            setup_assessment=None,
+            uncertainty=None,
+            trend_direction=None,
+            trend_quality=None,
+            structure_quality=None,
+            setup_quality=None,
+            context_risk=None,
+            timestamp=None,
+            error_message=(
+                f"TESTING: agent deliberately forced to fail (force_scenario={force_scenario!r}) "
+                f"for guardrail verification. No Claude request was made."
+            ),
+        )
+
+    profile = _SYNTHETIC_AGENT_PROFILES[force_scenario]
+    note = (
+        f"TESTING: synthetic analysis (force_scenario={force_scenario!r}) for guardrail "
+        f"verification -- not a real reading of the chart."
+    )
+    return AgentAnalysisResult(
+        status=AgentAnalysisStatus.SUCCESS,
+        analysis_text=note,
+        trend_assessment=note,
+        structure_assessment=note,
+        setup_assessment=note,
+        uncertainty=profile["uncertainty"],
+        trend_direction=profile["trend_direction"],
+        trend_quality=profile["trend_quality"],
+        structure_quality=profile["structure_quality"],
+        setup_quality=profile["setup_quality"],
+        context_risk=profile["context_risk"],
+        timestamp=datetime.now(timezone.utc),
+        error_message=None,
+    )
+
+
 def _capture_summary(result: CaptureResult) -> str:
     if result.status == CaptureStatus.SUCCESS:
         return f"Chart capture succeeded ({result.mode.value} mode)."
@@ -163,16 +340,29 @@ def _evaluation_summary(result: EvaluationResult) -> str:
     return f"Evaluation failed: {result.error_message}"
 
 
-def run_pipeline(session: Session, run_id: str) -> Run:
+def run_pipeline(session: Session, run_id: str, *, force_scenario: Optional[str] = None) -> Run:
     """
     Runs the full capture -> market data -> agent -> evaluation ->
     guardrails pipeline for one run and persists every step, in order, as
     it happens. Returns the updated Run.
 
+    force_scenario: Milestone 12 testing affordance, see the module
+    docstring above. None (the default, and the only value any real run
+    ever uses) means every stage runs for real, exactly as before this
+    parameter existed. A non-None value must be one of FORCE_SCENARIOS --
+    callers (backend/api/routes_runs.py) are expected to have already
+    validated this and checked TESTING_CONTROLS_ENABLED; this function
+    re-validates anyway, the same defense-in-depth pattern used
+    everywhere else in this codebase.
+
     Raises RunAlreadyAnalyzedError if this run already has any pipeline
-    results. Callers (backend/api/routes_runs.py) are expected to have
-    already confirmed the run exists -- this function assumes it does.
+    results. Callers are expected to have already confirmed the run
+    exists -- this function assumes it does.
     """
+    if force_scenario is not None and force_scenario not in FORCE_SCENARIOS:
+        allowed = ", ".join(sorted(FORCE_SCENARIOS))
+        raise ValueError(f"force_scenario must be one of: {allowed} (got {force_scenario!r})")
+
     run = crud.get_run(session, run_id)
     if run is None:
         raise ValueError(f"Run {run_id} not found")
@@ -196,11 +386,36 @@ def run_pipeline(session: Session, run_id: str) -> Run:
     )
     crud.update_run_status(session, run_id=run_id, status="ANALYZING")
 
+    if force_scenario is not None:
+        # Written first, before any stage runs, so it's the very first
+        # thing anyone reading this run's audit trail sees -- this run's
+        # results are not a real analysis.
+        crud.add_audit_event(
+            session,
+            run_id=run_id,
+            event_type="testing_scenario_forced",
+            event_message=(
+                f"TESTING: this run's pipeline was deliberately altered to force "
+                f"scenario {force_scenario!r} for guardrail verification. This is "
+                f"not a real analysis."
+            ),
+        )
+
     # --- Step 4: chart capture ---
     crud.add_audit_event(
         session, run_id=run_id, event_type="capture_started", event_message="Chart capture started."
     )
-    capture_result = CaptureManager().capture(run.symbol, run.timeframe)
+    capture_manager = CaptureManager()
+    if force_scenario == "capture_fails":
+        capture_result = _forced_failed_capture(
+            capture_manager.mode, run.symbol, run.timeframe, force_scenario
+        )
+    else:
+        capture_result = capture_manager.capture(run.symbol, run.timeframe)
+        if force_scenario == "capture_stale" and capture_result.status == CaptureStatus.SUCCESS:
+            capture_result = dataclasses.replace(
+                capture_result, captured_at=capture_result.captured_at - _STALE_AGE
+            )
     crud.add_capture(
         session,
         run_id=run_id,
@@ -223,7 +438,17 @@ def run_pipeline(session: Session, run_id: str) -> Run:
     crud.add_audit_event(
         session, run_id=run_id, event_type="market_data_started", event_message="Market data fetch started."
     )
-    market_data_result = MarketDataManager().get_quote(run.symbol)
+    market_data_manager = MarketDataManager()
+    if force_scenario == "market_data_fails":
+        market_data_result = _forced_failed_market_data(
+            market_data_manager.mode, run.symbol, force_scenario
+        )
+    else:
+        market_data_result = market_data_manager.get_quote(run.symbol)
+        if force_scenario == "market_data_stale" and market_data_result.status == MarketDataStatus.SUCCESS:
+            market_data_result = dataclasses.replace(
+                market_data_result, timestamp=market_data_result.timestamp - _STALE_AGE
+            )
     crud.add_market_data(
         session,
         run_id=run_id,
@@ -252,7 +477,17 @@ def run_pipeline(session: Session, run_id: str) -> Run:
         crud.add_audit_event(
             session, run_id=run_id, event_type="agent_analysis_started", event_message="Agent analysis started."
         )
-        agent_result = TradeAgent().analyze(capture_result, market_data_result, trade_params)
+        # Reaching this branch means both upstream stages reported
+        # SUCCESS, so any force_scenario still active here is one of
+        # capture_stale/market_data_stale/agent_fails/high_uncertainty/
+        # perfect_demo_score (capture_fails/market_data_fails never reach
+        # this branch at all -- they always produce a FAILED upstream
+        # result). Never a real Claude call while any of those is active:
+        # free, deterministic, and the whole point is a reproducible run.
+        if force_scenario is not None:
+            agent_result = _forced_agent_result(force_scenario)
+        else:
+            agent_result = TradeAgent().analyze(capture_result, market_data_result, trade_params)
         if agent_result.status == AgentAnalysisStatus.SUCCESS:
             crud.add_agent_analysis(
                 session,

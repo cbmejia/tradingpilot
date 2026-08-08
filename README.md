@@ -11,9 +11,11 @@ integration anywhere in this codebase. See [docs/architecture.md](docs/architect
 for the full design, including why the agent never touches a dollar amount
 or a score directly.
 
-This project is being built incrementally, one milestone at a time. See
-[docs/iterations.md](docs/iterations.md) for what's been built so far and
-what's next.
+This project was built incrementally across twelve milestones, all now
+complete — see [docs/iterations.md](docs/iterations.md) for the full
+build history, and [docs/failure_modes.md](docs/failure_modes.md) for
+reproducible proof that every safety mechanism actually stops a bad run,
+not just a description of what they're supposed to do.
 
 ## Structure
 
@@ -28,8 +30,8 @@ what's next.
 - `prompts/` — versioned markdown prompt templates
 - `screenshots/` — captured chart images (`live/` and `demo/`)
 - `logs/` — runtime logs
-- `docs/` — architecture, the evaluation rubric ([rubric.md](docs/rubric.md)), testing, and iteration notes
-- `tests/` — automated tests
+- `docs/` — architecture, the evaluation rubric ([rubric.md](docs/rubric.md)), documented failure modes ([failure_modes.md](docs/failure_modes.md)), and iteration notes
+- `tests/` — automated tests, including one end-to-end test per documented failure scenario (`tests/test_failure_scenarios.py`)
 
 ## Running the app
 
@@ -316,9 +318,35 @@ If the backend isn't running, step 1 shows a clear message ("Could not
 reach the TradePilot backend at http://127.0.0.1:8000. Is it running?")
 instead of hanging.
 
+## Proving the safety mechanisms actually work
+
+A demo that only shows a clean, successful run doesn't prove any of this
+app's safety claims. **[docs/failure_modes.md](docs/failure_modes.md)**
+documents eleven scenarios — a failed chart capture, a stale quote, an
+agent that refuses to answer, a setup with a bad risk/reward ratio, a
+`HIGH`-uncertainty analysis, a `DEMO` run that scores a perfect 100, and
+more — each one a real, reproducible run showing a specific guardrail
+actually stopping it, with the exact real system output and an
+explanation of why that behavior is correct.
+
+Four of the eleven happen through completely ordinary use of the app.
+The other seven need a **testing-only affordance**: a dropdown in the
+Analyze panel labeled *"Testing only — force a failure scenario."* It's
+gated behind `TESTING_CONTROLS_ENABLED` in `.env` (default `false`) — set
+it to `true` and restart the backend to use it; leave it off and the
+dropdown does nothing but return a clear `403`. Every run it produces is
+labeled unmistakably as a test, in the UI and in the audit trail, and it
+never fabricates a score or a guardrail verdict — only ever a stage's
+input, same as a real failure would look like. Full details, and exactly
+what to click for each scenario, in
+[docs/failure_modes.md](docs/failure_modes.md).
+
 ## Status
 
-Milestone 11 of 12: the frontend is wired to the real backend — analyze
-a symbol, watch real pipeline progress, see every score traced back to
-its evidence, and approve or reject the result, all from the browser.
-See [docs/iterations.md](docs/iterations.md).
+All twelve milestones complete — this is the "6C baseline" (git tag
+`6c-baseline`). Analyze a symbol, watch real pipeline progress, see
+every score traced back to its evidence, approve or reject the result,
+and reproduce any of eleven documented failure scenarios, all from the
+browser. See [docs/iterations.md](docs/iterations.md) for the full
+build history and [docs/failure_modes.md](docs/failure_modes.md) for
+the safety-mechanism evidence.

@@ -135,7 +135,7 @@ describe("App", () => {
 
     await user.click(screen.getByRole("button", { name: /^analyze$/i }));
 
-    await waitFor(() => expect(api.analyzeRun).toHaveBeenCalledWith("run-1"));
+    await waitFor(() => expect(api.analyzeRun).toHaveBeenCalledWith("run-1", undefined));
     expect(api.createRun).toHaveBeenCalledTimes(1);
 
     // The finished run's evaluation, guardrail outcome, and demo label
@@ -143,6 +143,56 @@ describe("App", () => {
     // computed by the frontend itself.
     expect(await screen.findByText("76")).toBeInTheDocument();
     expect(screen.getAllByText(/demo data/i).length).toBeGreaterThan(0);
+  });
+
+  it("Milestone 12: choosing a testing scenario sends force_scenario and shows the unmistakable testing banner", async () => {
+    const user = userEvent.setup();
+    const forced = demoRun({
+      status: "BLOCKED",
+      guardrail_outcome: "BLOCKED",
+      captures: [
+        {
+          id: 1,
+          capture_mode: "DEMO",
+          symbol: "EURUSD",
+          timeframe: "1h",
+          screenshot_path: null,
+          captured_at: null,
+          status: "FAILED",
+          error_message:
+            "TESTING: capture deliberately forced to fail (force_scenario='capture_fails') for guardrail verification. This is not a real capture failure.",
+        },
+      ],
+      analyses: [],
+      evaluations: [],
+      audit_events: [
+        {
+          id: 1,
+          event_type: "testing_scenario_forced",
+          event_message:
+            "TESTING: this run's pipeline was deliberately altered to force scenario 'capture_fails' for guardrail verification. This is not a real analysis.",
+          timestamp: "2026-01-01T00:00:00Z",
+        },
+      ],
+    });
+
+    vi.mocked(api.createRun).mockResolvedValue({ id: "run-1", status: "CREATED" });
+    vi.mocked(api.getRun).mockResolvedValue(forced);
+    vi.mocked(api.analyzeRun).mockResolvedValue(forced);
+
+    render(<App />);
+
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: /force a testing scenario/i }),
+      "capture_fails",
+    );
+    await user.click(screen.getByRole("button", { name: /forcing a test scenario/i }));
+
+    await waitFor(() =>
+      expect(api.analyzeRun).toHaveBeenCalledWith("run-1", "capture_fails"),
+    );
+    expect(await screen.findByText(/testing run — not a real analysis/i)).toBeInTheDocument();
+    expect(screen.getByText(/capture deliberately forced to fail/i)).toBeInTheDocument();
   });
 
   it("approving is disabled and rejecting works for a BLOCKED run reached via the run list", async () => {

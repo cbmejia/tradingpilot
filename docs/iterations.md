@@ -1619,6 +1619,254 @@ Alpha Vantage key); Milestone 12 (frontend test coverage beyond what's
 listed above, and any end-to-end/browser-automation pass) hasn't
 started.
 
+## Milestone 12 — documented failure modes and final verification
+
+The last of the twelve planned milestones. Its purpose wasn't new
+features — it was proving, with real reproducible evidence, that every
+safety mechanism built across Milestones 1–11 actually does its job when
+things go wrong, not just when they go right. A demo that only shows a
+clean successful run proves nothing about a safety-critical tool; this
+milestone is the other half.
+
+### Part 1 — a testing affordance, not a code change per demo
+
+Eleven scenarios were specified. Four of them (RR below minimum,
+incoherent trade params, approving a `BLOCKED` run, deciding twice)
+already happen through completely ordinary use of the app — no new
+mechanism needed, just specific input values, documented in
+`docs/failure_modes.md`. The other seven can't be produced through input
+alone (they depend on exact timing or on what a live LLM happens to
+say), so a genuine testing affordance was built: `force_scenario`, an
+optional parameter on `POST /runs/{run_id}/analyze` that deliberately
+substitutes a synthetic result for exactly one pipeline stage.
+
+**The three deliberate safety properties this mechanism has, and why
+each one exists:**
+
+1. **Gated behind `TESTING_CONTROLS_ENABLED`, a backend `.env` flag that
+   defaults to `false`.** `backend/config.py` reads it once at process
+   start. `backend/api/routes_runs.py`'s `analyze_run()` checks it
+   before doing anything with `force_scenario` and refuses with `403`
+   if it's off — a request supplying `force_scenario` has *zero* effect
+   against a normally-configured backend, however it's supplied (a typed
+   URL, a crafted request, anything). This is what makes the answer to
+   "could this affect a real run's honesty" an architectural "no," not
+   a promise: turning it on requires editing the backend's own `.env`
+   and restarting the process, not anything reachable from a browser
+   tab or a request alone.
+2. **Every forced run says so, loudly, more than once.** The very first
+   thing `run_pipeline()` writes for a forced run, before any stage
+   even starts, is a `testing_scenario_forced` audit event in plain
+   English. `frontend/src/components/RunDetailView.tsx` checks for that
+   exact event and — if present — renders a dashed amber banner reading
+   *"Testing run — not a real analysis"* at the very top of the detail
+   view, above everything else. Every synthetic value's own text (error
+   messages, prose) starts with `TESTING:`. There's no path to seeing a
+   forced run's result without also seeing, immediately, that it was
+   forced.
+3. **Only ever fabricates a stage's INPUT to the next stage, never a
+   score or a verdict.** `backend/orchestrator.py`'s `force_scenario`
+   handling touches capture, market data, and the agent's qualitative
+   output only — `evals/trade_evaluator.py` and `guardrails/rules.py`
+   are never touched, never bypassed, and never even aware
+   `force_scenario` exists. A forced "perfect score" run's 100 is
+   computed for real from synthetic-but-realistic category words, the
+   exact same code path a real Claude response would go through — which
+   is what makes scenario 9 an actual *proof* that `SYNTHETIC_DATA`
+   catches a perfect score, not just a claim that it would.
+
+**Implementation:**
+
+- `backend/config.py` — `TESTING_CONTROLS_ENABLED` (bool, default
+  `False`).
+- `backend/orchestrator.py` — `FORCE_SCENARIOS` (the seven allowed
+  values: `capture_fails`, `capture_stale`, `market_data_fails`,
+  `market_data_stale`, `agent_fails`, `high_uncertainty`,
+  `perfect_demo_score`), `run_pipeline()` gained an optional
+  `force_scenario` keyword argument (`None` — the only value any real
+  run ever uses — leaves every stage exactly as it was before this
+  parameter existed). `capture_fails`/`market_data_fails` synthesize a
+  `FAILED` result shaped identically to a real one, labeled with the
+  real configured `LIVE`/`DEMO` mode so the UI's badges stay accurate.
+  `capture_stale`/`market_data_stale` run the *real* provider (a
+  genuine successful capture/quote) and then override just the
+  timestamp two hours into the past (`dataclasses.replace()`) before
+  persisting — comfortably past either default freshness threshold.
+  `agent_fails`/`high_uncertainty`/`perfect_demo_score` never make a
+  real Claude call (free, deterministic, fully reproducible) — a small
+  `_SYNTHETIC_AGENT_PROFILES` table maps each to the categorical fields
+  and uncertainty level a synthetic `SUCCESS` `AgentAnalysisResult`
+  uses; `agent_fails` alone returns `FAILED`. `force_scenario` is
+  validated against `FORCE_SCENARIOS` a second time inside
+  `run_pipeline()` itself (defense in depth, the same pattern every
+  other validated value in this codebase already follows).
+- `backend/api/routes_runs.py` — `analyze_run()` gained an optional
+  `force_scenario` query parameter, documented in its own OpenAPI
+  description as testing-only. `403` if `TESTING_CONTROLS_ENABLED` is
+  off; `422` if the value isn't one of `FORCE_SCENARIOS`; otherwise
+  passed straight through to `run_pipeline()`.
+- `.env.example` — `TESTING_CONTROLS_ENABLED=false` documented with an
+  explicit warning never to leave it on for a deployment anyone might
+  mistake for real.
+- **Frontend:** `components/TestingControls.tsx` — a dropdown in the
+  Analyze panel, deliberately styled to look like nothing else in this
+  app (dashed amber border, explicit "TESTING ONLY" label) so it can
+  never be mistaken for a real control. Always rendered — if the
+  backend has testing controls disabled, choosing a scenario just
+  surfaces the real `403` in the normal error banner, the same as any
+  other API error; there's no separate frontend-only gate to keep in
+  sync with the backend one. `api/types.ts`'s `FORCE_SCENARIOS` mirrors
+  the backend's list (value, label, and the expected outcome, shown
+  under the dropdown once a scenario is picked). `AnalyzeForm.tsx`
+  threads the choice through to `api.analyzeRun(runId, forceScenario)`;
+  the submit button itself relabels to *"Analyze (forcing a test
+  scenario)"* and turns amber when a scenario is selected, one more
+  layer of "this isn't a normal Analyze click." `RunDetailView.tsx`'s
+  banner is described above.
+
+### Part 2 — `docs/failure_modes.md`
+
+A new, standalone document: one section per scenario (what to click/type
+to trigger it, what the system does, which specific guardrail fires and
+its real output, what the UI shows, and *why* that behavior is correct —
+not just a description, an argument), written for someone who has never
+seen this codebase before. Every piece of evidence quoted in it (error
+messages, scores, guardrail reasons) is real output copied from actual
+runs executed against the live backend while writing it, not
+invented or paraphrased from the code.
+
+### Part 3 — tests
+
+`tests/test_failure_scenarios.py` — 14 tests, one per scenario (11) plus
+three covering the mechanism itself: `force_scenario` refused with `403`
+when `TESTING_CONTROLS_ENABLED` is off, an unrecognized value refused
+with `422`, and an ordinary analysis with no `force_scenario` at all
+confirmed completely unaffected (no `testing_scenario_forced` audit
+event, real agent output flows through untouched). Every test goes
+through the real API (`TestClient`) against the real orchestrator and
+real `DemoProvider`/`DemoMarketDataProvider` fixtures — these are
+genuine end-to-end tests, not isolated unit tests re-testing logic
+`tests/test_guardrails.py`/`tests/test_evaluation.py` already covered
+with hand-built fixtures.
+
+All 218 backend tests pass (24 database + 32 API + 17 capture + 19
+market data + 25 agent + 32 evaluation + 36 guardrails + 10 orchestrator
++ 14 failure scenarios — up from 204). All 32 frontend tests pass (up
+from 27; `TestingControls.test.tsx` new, `App.test.tsx` gained one test
+for the forced-scenario flow and banner).
+
+### Manual verification
+
+Ran all eleven scenarios against a real running backend
+(`TESTING_CONTROLS_ENABLED=true`), gathering the exact evidence quoted
+in `docs/failure_modes.md` directly from real HTTP responses — not
+reasoned about, executed. Additionally verified scenario 1 through the
+actual browser UI: selected "Capture fails" from the dropdown, confirmed
+the submit button relabeled to *"Analyze (forcing a test scenario)"*,
+clicked it, and confirmed via direct DOM inspection that the detail view
+showed the dashed amber *"Testing run — not a real analysis"* banner
+with the real forced-scenario message, the Chart capture card showing
+*"Chart capture failed"* with the real `TESTING:` error (no broken
+image), the Agent analysis and Evaluation cards both showing *"Status:
+FAILED"*, the overall status `BLOCKED`, and the Approve button disabled
+with the exact blocking reason printed above it. (Visual screenshots
+aren't renderable in this non-interactive session's browser pane — DOM
+inspection confirmed byte-identical content to what a screenshot would
+show. Genuine screenshots are trivial to take when running this
+locally, which `docs/failure_modes.md` assumes.) Dev database and local
+`.env` (`TESTING_CONTROLS_ENABLED` set back to `false`) both reset
+afterward.
+
+### Part 4 — final review, verified by direct code inspection, not asserted
+
+**Does any code path still allow a trade to be placed, submitted, or
+simulated?** No. `grep -rniE` across every `.py` file in this repo for
+`place_order|submit_order|execute_trade|broker|order_execution|
+buy_order|sell_order|create_order|cancel_order` returns zero matches
+outside documentation. There is no broker client, no order-execution
+library dependency, and no network call anywhere in this codebase whose
+target is anything other than: TradingView (read-only chart viewing,
+`capture/live_provider.py`), Alpha Vantage (read-only quote fetching,
+`tools/market_data.py`), and the Anthropic API (`agents/trade_agent.py`,
+whose own prompts additionally instruct the model never to phrase
+anything as an instruction to buy, sell, enter, or exit). The only two
+terminal states any run can ever reach — `APPROVED` and `REJECTED` — are
+both plain database writes with no side effect beyond themselves.
+
+**Does any code path allow an approved state without a human decision?**
+No. `grep -rn '"APPROVED"'` across the codebase shows the string
+appears in exactly one place where it's ever *written* to `Run.status`:
+`backend/api/routes_runs.py`'s `review_run()`, and only as
+`payload.decision` — a value that arrived in an actual `POST
+/runs/{run_id}/review` HTTP request body, validated against
+`ALLOWED_DECISIONS = {"APPROVED", "REJECTED"}`
+(`backend/schemas.py`) before this function is ever entered. Every other
+call site of `crud.update_run_status()` — the only function that writes
+`Run.status` at all — either hardcodes the literal `"ANALYZING"` or
+writes `report.outcome.value`, and `GuardrailOutcome`
+(`guardrails/rules.py`) has exactly three members
+(`BLOCKED`/`REQUIRES_REVIEW`/`READY_FOR_REVIEW`) — `"APPROVED"` isn't a
+value that enum can even produce. There is no code path from pipeline
+completion to `APPROVED` that doesn't pass through a real HTTP request
+carrying a human's explicit decision.
+
+**Can the agent's output still influence a score except through the
+documented categorical fields?** No. `evals/trade_evaluator.py` reads
+exactly seven attributes off `AgentAnalysisResult`: `.status` and
+`.error_message` (both used only to short-circuit a failed analysis,
+never to compute a score), `.trend_direction`, `.trend_quality`,
+`.structure_quality`, `.setup_quality`, `.context_risk`, and
+`.uncertainty`. Grepping the file for any reference to
+`.analysis_text`/`.trend_assessment`/`.structure_assessment`/
+`.setup_assessment` — the four prose fields — returns zero matches. The
+prose exists on every successful `AgentAnalysisResult` and is shown to
+the human reviewer in the UI, but the scoring code has no line that
+touches it.
+
+**Is there any remaining silent fallback, invented value, or fabricated
+result anywhere in the pipeline?** None found. Every `except` clause in
+`capture/`, `tools/market_data.py`, `agents/trade_agent.py`,
+`evals/trade_evaluator.py`, and `database/crud.py` catches a specific
+exception type (never a bare `except:`) and every one of them returns a
+`FAILED`/error result carrying the real exception text — none return a
+default value, a placeholder, or a previously-cached result.
+`CaptureManager`/`MarketDataManager` each construct exactly one provider
+in `__init__`, based on the configured mode, and every subsequent
+`.capture()`/`.get_quote()` call only ever reaches that one
+provider — there is no code path, anywhere, that calls the other
+provider after the first one fails. No hardcoded non-zero
+`price`/`screenshot_path` default exists anywhere in either fetch path.
+
+**What is the weakest part of this project right now, honestly?**
+Two things, in order:
+
+1. **There is no authentication or rate limiting on the API at all.**
+   Every endpoint — including `POST /runs/{run_id}/analyze`, which can
+   make a real, billed Anthropic API call — is reachable by anyone who
+   can reach the port, with no login, no API key, no per-caller limit.
+   For a single developer running this on `localhost`, exactly as
+   designed and documented throughout this project, that's a non-issue.
+   It stops being one the moment this is ever reachable from anywhere
+   but `localhost` — a misconfigured `BACKEND_HOST` or a port forwarded
+   without thinking about it would let anyone spend real money by
+   spamming analyze requests, with nothing in this codebase to stop
+   them. This has been true since Milestone 4 and was never in scope to
+   fix, but it's the single most real, immediately exploitable gap in
+   the project as it stands today.
+2. **LIVE mode is comparatively unproven.** Every guardrail, every
+   scenario in this milestone, and nearly every piece of manual
+   verification across all twelve milestones has been exercised in
+   DEMO mode. `capture/live_provider.py`'s Playwright-driven TradingView
+   scraping and `tools/market_data.py`'s real Alpha Vantage integration
+   are unit-tested with mocks, but neither has been run against the
+   real internet in the course of this project. Nothing about that is
+   architecturally unsafe — a real scraping failure or a real API
+   outage would show up exactly the way this milestone proves failures
+   always show up: a clear `FAILED` result, never a silent one — but
+   "the failure path is honest" and "the happy path actually works
+   against the real internet" are different claims, and only the first
+   one has been demonstrated here.
+
 ## Rebuilding the database
 
 `init_db()` only ever adds tables that don't exist yet — it never alters
@@ -1653,4 +1901,5 @@ isn't forgotten.
 10. ~~Human approval~~
 10.5. ~~Orchestrator~~
 11. ~~UI (incl. Tailwind migration)~~
-12. Testing
+12. ~~Testing~~ — all twelve milestones complete. See "6c-baseline" in
+    git for this state.

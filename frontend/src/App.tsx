@@ -94,7 +94,7 @@ function App() {
 
   useEffect(() => stopPolling, [stopPolling]);
 
-  async function handleAnalyzeSubmit(payload: RunCreateRequest) {
+  async function handleAnalyzeSubmit(payload: RunCreateRequest, forceScenario?: string) {
     setFormError(null);
     setIsAnalyzing(true);
     setDetailError(null);
@@ -131,7 +131,7 @@ function App() {
     }, POLL_INTERVAL_MS);
 
     try {
-      const finished = await api.analyzeRun(runId);
+      const finished = await api.analyzeRun(runId, forceScenario);
       setSelectedRun(finished);
     } catch (err) {
       setFormError(errorMessage(err));

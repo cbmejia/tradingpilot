@@ -1,21 +1,39 @@
 # Session handoff
 
 Written for a brand-new Claude Code session with zero conversation
-history. Read this first, then the three docs it links to rather than
+history. Read this first, then the docs it links to rather than
 duplicates: [docs/architecture.md](architecture.md),
-[docs/iterations.md](iterations.md), [docs/rubric.md](rubric.md), and
-the root [README.md](../README.md).
+[docs/iterations.md](iterations.md), [docs/rubric.md](rubric.md),
+[docs/failure_modes.md](failure_modes.md), and the root
+[README.md](../README.md).
 
 ## 1. Current state
 
-- **Milestones 1–11 are complete.** Milestone 12 (testing) is next.
-- **Latest commit:** "Milestone 11 - frontend wired to backend".
-- **Test count:** 211 backend tests + 27 frontend tests, all passing.
+- **All twelve planned milestones are complete.** This is the "6C
+  baseline" — see the annotated git tag `6c-baseline` for exactly this
+  state, and the command to return to it, in
+  [docs/iterations.md](iterations.md)'s Milestone 12 entry. There is no
+  Milestone 13 planned; anything from here is new work, not finishing
+  the original plan.
+- **Latest commit:** "Milestone 12 - documented failure modes and final
+  verification".
+- **Test count:** 218 backend tests + 32 frontend tests, all passing.
   Backend: 24 database + 32 API + 17 capture + 19 market data + 25 agent
-  + 32 evaluation + 36 guardrails + 10 orchestrator. Frontend: 27 tests
-  across 8 files (Vitest + React Testing Library), none making a real
-  network call. See the roadmap checklist at the bottom of
-  [docs/iterations.md](iterations.md) for the full milestone list.
+  + 32 evaluation + 36 guardrails + 10 orchestrator + 14 failure
+  scenarios. Frontend: 32 tests across 9 files (Vitest + React Testing
+  Library), none making a real network call. See the roadmap checklist
+  at the bottom of [docs/iterations.md](iterations.md) for the full
+  milestone list.
+- **Read [docs/failure_modes.md](failure_modes.md) before touching
+  anything safety-related.** Eleven scenarios, each a real reproducible
+  run, proving every guardrail actually stops a bad run — not just
+  asserted in a unit test. It also documents `force_scenario`
+  (`POST /runs/{run_id}/analyze?force_scenario=...`), a testing-only
+  mechanism gated behind `TESTING_CONTROLS_ENABLED` (off by default in
+  `.env`) that deliberately forces one pipeline stage to a synthetic
+  result so a guardrail can be demonstrated on demand. If you're asked
+  to add a new failure scenario or guardrail, this is the pattern to
+  extend, not a new one-off.
 - **The frontend is wired to the real backend.** Submit a symbol in the
   UI → it creates a run, runs the real pipeline, and shows the real
   result: chart image, market quote, agent prose and categories, every
@@ -42,6 +60,20 @@ the root [README.md](../README.md).
   Milestone 10.5 fix 2 audit. Every field every pipeline dataclass
   produces now has a corresponding column — see the three "Milestone
   10.5 fix" entries in [docs/iterations.md](iterations.md).
+- **A final, code-verified review (not just asserted) closed Milestone
+  12** — no trade-execution code path exists anywhere (grepped, zero
+  matches), no code path reaches `APPROVED` without a real human
+  `POST /runs/{id}/review` request, the evaluator never reads the
+  agent's prose (only its seven categorical/status fields), and no
+  silent fallback or fabricated value was found anywhere in the
+  pipeline. Two honestly-named weak points: **no authentication or rate
+  limiting on the API** (fine on `localhost`, a real problem the moment
+  this is reachable from anywhere else — spammable, and each analyze
+  call can cost real money), and **LIVE mode is comparatively unproven**
+  (real TradingView scraping and real Alpha Vantage calls are
+  unit-tested with mocks but were never run against the real internet
+  in this project). See the Milestone 12 entry in
+  [docs/iterations.md](iterations.md) for the full verification.
 - See "How to run everything" below for the exact commands to start both
   servers and exercise the app.
 
@@ -174,14 +206,32 @@ click-by-click steps to run one DEMO analysis end to end in the UI:
 - [Checking guardrails](../README.md#checking-guardrails-by-hand)
 - [Running a full analysis pipeline, then approving/rejecting it, from `/docs`](../README.md#running-a-full-analysis-pipeline-by-hand)
 - [Running one DEMO analysis end to end in the UI](../README.md#running-a-demo-analysis-in-the-ui)
+- [Reproducing any of the eleven documented failure scenarios](../docs/failure_modes.md)
 
-## 6. What is not built yet
+## 6. What's not built, and what's genuinely still weak
 
-- **Milestone 12 — Testing.** What this covers beyond the substantial
-  test suite that already exists (211 backend tests + 27 frontend
-  tests) isn't yet decided — likely candidates are broader frontend
-  coverage and a real end-to-end/browser-automation pass, but that
-  should be scoped as its own milestone discussion, not assumed here.
+The 6C plan is complete — this section is no longer "what's next," it's
+"what was deliberately left out, and where this project is honestly
+weakest." Both are worth reading before assuming a gap needs fixing;
+some of these are documented tradeoffs, not oversights.
+
+- **No authentication or rate limiting on the API.** Named plainly as
+  the weakest part of this project in the Milestone 12 final review.
+  Fine for a single developer on `localhost` (how this has been built
+  and run throughout); a real risk — spammable, and `POST
+  /runs/{id}/analyze` can cost real money per call — the moment this is
+  ever reachable from anywhere else. If a future request is "expose
+  this beyond localhost" or "add multi-user support," this is the first
+  thing that needs solving, not an afterthought.
+- **LIVE mode is comparatively unproven.** Named as the second weakest
+  part. Real TradingView scraping (`capture/live_provider.py`) and real
+  Alpha Vantage calls (`tools/market_data.py`) are unit-tested with
+  mocks but have never been run against the real internet in this
+  project — every guardrail proof, every manual verification, and all
+  of Milestone 12's failure-scenario evidence is DEMO-mode. Not
+  architecturally unsafe (a real failure there would still show up as
+  an honest `FAILED` result, per every invariant this project enforces)
+  — just genuinely untested against reality.
 - **Known, deliberate scope limits from Milestone 11** (not gaps,
   documented tradeoffs — see that entry in
   [docs/iterations.md](iterations.md) for the reasoning): the run list
@@ -197,3 +247,7 @@ click-by-click steps to run one DEMO analysis end to end in the UI:
 - **No known schema gaps remain.** The eight-table audit from Milestone
   10.5 fix 2 found two gaps; fix 3 closed both. Every field every
   pipeline dataclass produces now has a corresponding column.
+- **`tools/economic_calendar.py` exists but was never wired into the
+  workflow** (mentioned in `docs/architecture.md` as "contextual input
+  for later"). Untouched since it was scaffolded — not part of the 12
+  milestones, not started.

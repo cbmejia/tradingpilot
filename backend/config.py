@@ -34,3 +34,16 @@ CAPTURE_MAX_AGE_SECONDS = float(os.getenv("CAPTURE_MAX_AGE_SECONDS", "300"))
 MARKET_DATA_MAX_AGE_SECONDS = float(os.getenv("MARKET_DATA_MAX_AGE_SECONDS", "900"))
 MIN_RISK_REWARD = float(os.getenv("MIN_RISK_REWARD", "1.0"))
 MIN_TOTAL_SCORE = int(os.getenv("MIN_TOTAL_SCORE", "60"))
+
+# Milestone 12: gates POST /runs/{run_id}/analyze's optional
+# force_scenario parameter (backend/orchestrator.py), which deliberately
+# substitutes a synthetic failure/stale/high-uncertainty/perfect-score
+# result for one pipeline stage so a guardrail's behavior can be proven
+# with a real, reproducible, screenshottable run -- see
+# docs/failure_modes.md. Off by default, on purpose: with this False (the
+# default if unset), force_scenario has no effect at all, however it's
+# supplied, so a real run's honesty can never be affected by it by
+# accident. Must be deliberately set to "true" in .env, and the backend
+# restarted, to use it -- never toggleable from the UI or from a request
+# alone.
+TESTING_CONTROLS_ENABLED = os.getenv("TESTING_CONTROLS_ENABLED", "false").strip().lower() == "true"

@@ -2,9 +2,10 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 import { ALLOWED_TIMEFRAMES } from "../api/types";
 import type { RunCreateRequest } from "../api/types";
+import { TestingControls } from "./TestingControls";
 
 interface AnalyzeFormProps {
-  onSubmit: (payload: RunCreateRequest) => void;
+  onSubmit: (payload: RunCreateRequest, forceScenario?: string) => void;
   busy: boolean;
   error: string | null;
 }
@@ -18,6 +19,7 @@ export function AnalyzeForm({ onSubmit, busy, error }: AnalyzeFormProps) {
   const [entry, setEntry] = useState("");
   const [stop, setStop] = useState("");
   const [target, setTarget] = useState("");
+  const [forceScenario, setForceScenario] = useState("");
 
   function handleSubmit(event: FormEvent) {
     event.preventDefault();
@@ -31,7 +33,7 @@ export function AnalyzeForm({ onSubmit, busy, error }: AnalyzeFormProps) {
       stop: stop ? Number(stop) : null,
       target: target ? Number(target) : null,
     };
-    onSubmit(payload);
+    onSubmit(payload, forceScenario || undefined);
   }
 
   const inputClass =
@@ -128,6 +130,8 @@ export function AnalyzeForm({ onSubmit, busy, error }: AnalyzeFormProps) {
         </label>
       </div>
 
+      <TestingControls value={forceScenario} onChange={setForceScenario} disabled={busy} />
+
       {error && (
         <p className="rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-300">
           {error}
@@ -137,9 +141,12 @@ export function AnalyzeForm({ onSubmit, busy, error }: AnalyzeFormProps) {
       <button
         type="submit"
         disabled={busy}
-        className="mt-1 rounded-md bg-sky-600 px-4 py-2 text-sm font-semibold text-white transition hover:bg-sky-500 disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400"
+        className={
+          "mt-1 rounded-md px-4 py-2 text-sm font-semibold text-white transition disabled:cursor-not-allowed disabled:bg-slate-700 disabled:text-slate-400 " +
+          (forceScenario ? "bg-amber-600 hover:bg-amber-500" : "bg-sky-600 hover:bg-sky-500")
+        }
       >
-        {busy ? "Analyzing…" : "Analyze"}
+        {busy ? "Analyzing…" : forceScenario ? "Analyze (forcing a test scenario)" : "Analyze"}
       </button>
     </form>
   );

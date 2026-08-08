@@ -16,6 +16,15 @@ function isDemoRun(run: RunDetail): boolean {
   return run.captures[0]?.capture_mode === "DEMO" || run.market_data[0]?.mode === "DEMO";
 }
 
+/** Milestone 12: backend/orchestrator.py writes a testing_scenario_forced
+ * audit event as the very first thing it does whenever force_scenario
+ * was used -- checking for it here is what makes a deliberately-forced
+ * run unmistakable in the UI, not just in the raw API response. */
+function forcedScenario(run: RunDetail): string | null {
+  const event = run.audit_events.find((e) => e.event_type === "testing_scenario_forced");
+  return event ? event.event_message : null;
+}
+
 interface RunDetailViewProps {
   run: RunDetail;
   onApprove: (comment: string) => void;
@@ -25,9 +34,19 @@ interface RunDetailViewProps {
 
 export function RunDetailView({ run, onApprove, onReject, reviewBusy }: RunDetailViewProps) {
   const demo = isDemoRun(run);
+  const forced = forcedScenario(run);
 
   return (
     <div className="flex flex-col gap-4">
+      {forced && (
+        <div className="rounded-md border-2 border-dashed border-amber-500 bg-amber-500/15 px-4 py-3">
+          <p className="text-sm font-bold uppercase tracking-wide text-amber-400">
+            Testing run — not a real analysis
+          </p>
+          <p className="mt-1 text-xs text-amber-300/90">{forced}</p>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-2">
         <h2 className="text-lg font-semibold text-slate-100">
           {run.symbol} <span className="text-slate-500">{run.timeframe}</span>

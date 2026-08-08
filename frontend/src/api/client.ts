@@ -74,8 +74,17 @@ export function createRun(payload: RunCreateRequest): Promise<RunCreateResponse>
   });
 }
 
-export function analyzeRun(runId: string): Promise<RunDetail> {
-  return request<RunDetail>(`/runs/${encodeURIComponent(runId)}/analyze`, {
+/**
+ * forceScenario (Milestone 12, testing only): deliberately forces one
+ * pipeline stage to a synthetic result so a guardrail's behavior can be
+ * proven with a real run -- see components/TestingControls.tsx and
+ * docs/failure_modes.md. Omit for every real analysis; the backend
+ * refuses it outright unless TESTING_CONTROLS_ENABLED=true is set on
+ * the server, so passing it has zero effect against a normal backend.
+ */
+export function analyzeRun(runId: string, forceScenario?: string): Promise<RunDetail> {
+  const query = forceScenario ? `?force_scenario=${encodeURIComponent(forceScenario)}` : "";
+  return request<RunDetail>(`/runs/${encodeURIComponent(runId)}/analyze${query}`, {
     method: "POST",
   });
 }

@@ -163,3 +163,26 @@ export const ALLOWED_TIMEFRAMES: readonly string[] = [
   "1d",
   "1w",
 ];
+
+// Milestone 12 — mirrors backend/orchestrator.py's FORCE_SCENARIOS
+// exactly. Each value deliberately substitutes a synthetic result for
+// one pipeline stage so a guardrail can be demonstrated with a real,
+// reproducible run -- see components/TestingControls.tsx and
+// docs/failure_modes.md. The backend refuses all of these outright
+// unless TESTING_CONTROLS_ENABLED=true is set on the server; this list
+// only controls what the dropdown offers, not whether it does anything.
+export interface ForceScenarioOption {
+  value: string;
+  label: string;
+  description: string;
+}
+
+export const FORCE_SCENARIOS: readonly ForceScenarioOption[] = [
+  { value: "capture_fails", label: "Capture fails", description: "Expect: BLOCKED, no chart, agent never called." },
+  { value: "capture_stale", label: "Capture stale", description: "Expect: BLOCKED on CAPTURE_FRESH." },
+  { value: "market_data_fails", label: "Market data fails", description: "Expect: BLOCKED, no invented price." },
+  { value: "market_data_stale", label: "Market data stale", description: "Expect: BLOCKED on MARKET_DATA_FRESH." },
+  { value: "agent_fails", label: "Agent fails", description: "Expect: FAILED analysis, no evaluation score, BLOCKED." },
+  { value: "high_uncertainty", label: "High agent uncertainty", description: "Expect: can never reach READY_FOR_REVIEW." },
+  { value: "perfect_demo_score", label: "Perfect demo score", description: "Expect: REQUIRES_REVIEW on SYNTHETIC_DATA, never READY_FOR_REVIEW." },
+];

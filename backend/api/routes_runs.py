@@ -23,7 +23,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from backend.orchestrator import RunAlreadyAnalyzedError, run_pipeline
+from backend import config
+from backend.orchestrator import FORCE_SCENARIOS, RunAlreadyAnalyzedError, run_pipeline
 from backend.schemas import (
     HumanReviewRequest,
     HumanReviewResponse,
@@ -111,7 +112,21 @@ def get_run(run_id: str, session: Session = Depends(get_session)) -> RunDetail:
 
 
 @router.post("/{run_id}/analyze", response_model=RunDetail)
-def analyze_run(run_id: str, session: Session = Depends(get_session)) -> RunDetail:
+def analyze_run(
+    run_id: str,
+    force_scenario: Optional[str] = Query(
+        default=None,
+        description=(
+            "TESTING ONLY (Milestone 12). Deliberately forces one pipeline stage to a "
+            "synthetic failed/stale/high-uncertainty/perfect-score result, so a "
+            "guardrail's behavior can be proven with a real, reproducible run. Refused "
+            "with 403 unless TESTING_CONTROLS_ENABLED=true is set in the backend's own "
+            ".env -- off by default, never toggleable from a request alone. See "
+            "docs/failure_modes.md."
+        ),
+    ),
+    session: Session = Depends(get_session),
+) -> RunDetail:
     """
     Runs the full capture -> market data -> agent -> evaluation ->
     guardrails pipeline for this run (Milestone 10.5) and persists every
@@ -124,8 +139,25 @@ def analyze_run(run_id: str, session: Session = Depends(get_session)) -> RunDeta
     if run is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
+    if force_scenario is not None:
+        if not config.TESTING_CONTROLS_ENABLED:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    "Testing controls are disabled. Set TESTING_CONTROLS_ENABLED=true in "
+                    "the backend's .env and restart the backend to use force_scenario -- "
+                    "this is off by default so a real run's honesty can never be affected "
+                    "by it accidentally."
+                ),
+            )
+        if force_scenario not in FORCE_SCENARIOS:
+            allowed = ", ".join(sorted(FORCE_SCENARIOS))
+            raise HTTPException(
+                status_code=422, detail=f"force_scenario must be one of: {allowed}"
+            )
+
     try:
-        updated_run = run_pipeline(session, run_id)
+        updated_run = run_pipeline(session, run_id, force_scenario=force_scenario)
     except RunAlreadyAnalyzedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
