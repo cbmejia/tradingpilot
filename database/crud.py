@@ -59,6 +59,30 @@ def get_run(session: Session, run_id: str) -> Optional[Run]:
     return session.get(Run, run_id)
 
 
+def update_run_status(
+    session: Session,
+    *,
+    run_id: str,
+    status: str,
+    completed_at: Optional[datetime] = None,
+) -> Optional[Run]:
+    """
+    Updates a run's status and, optionally, its completion timestamp.
+    Used by the human-review endpoint (Milestone 10) to move a run to its
+    terminal state after a decision is recorded. Returns None if the run
+    doesn't exist (callers are expected to have already checked).
+    """
+    run = session.get(Run, run_id)
+    if run is None:
+        return None
+    run.status = status
+    if completed_at is not None:
+        run.completed_at = completed_at
+    session.commit()
+    session.refresh(run)
+    return run
+
+
 def list_runs(session: Session, *, limit: int = 20, offset: int = 0) -> tuple[list[Run], int]:
     """
     Fetch a page of runs, newest first, plus the total count of all runs

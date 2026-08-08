@@ -259,6 +259,41 @@ REVIEW_FORCING_RULES = frozenset(
 )
 
 
+def outcome_from_results(results) -> Optional[GuardrailOutcome]:
+    """
+    Derives the overall GuardrailOutcome from a set of already-stored
+    results -- e.g. a run's GuardrailResult database rows, read back as
+    (guardrail_name, passed) pairs -- rather than from a live
+    evaluate_guardrails() call.
+
+    Uses the exact same BLOCKING_RULES/REVIEW_FORCING_RULES
+    classification evaluate_guardrails() uses, so a run's outcome is
+    always derived the same way whether it's being computed live or
+    reconstructed from storage (e.g. by the human-review endpoint,
+    Milestone 10).
+
+    Returns None if `results` is empty -- there is no evidence
+    guardrails ever ran for this run, so no outcome can be claimed
+    (treated the same as BLOCKED by anything that gates on "must not be
+    BLOCKED," since "unknown" is not a safer thing to assume than
+    "blocked").
+
+    results: an iterable of (guardrail_name, passed) pairs.
+    """
+    results = list(results)
+    if not results:
+        return None
+
+    blocked = any(not passed for name, passed in results if name in BLOCKING_RULES)
+    needs_review = any(not passed for name, passed in results if name in REVIEW_FORCING_RULES)
+
+    if blocked:
+        return GuardrailOutcome.BLOCKED
+    if needs_review:
+        return GuardrailOutcome.REQUIRES_REVIEW
+    return GuardrailOutcome.READY_FOR_REVIEW
+
+
 def evaluate_guardrails(
     capture_result: CaptureResult,
     market_data_result: MarketQuote,

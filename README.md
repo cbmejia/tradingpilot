@@ -198,7 +198,60 @@ Change `captured_at=now - timedelta(hours=2)` to
 [docs/iterations.md](docs/iterations.md) for the full table of all
 eleven rules, their thresholds, and what each one does on failure.
 
+## Approving or rejecting a run from `/docs`
+
+Start the server (see above) and open **http://127.0.0.1:8000/docs**.
+
+**Reject a run — works right now, no setup needed:**
+
+1. Expand **`POST /runs`** → **Try it out** → paste:
+   ```json
+   {"symbol": "EURUSD", "timeframe": "1h", "direction": "long", "entry": 1.0950, "stop": 1.0900, "target": 1.1050}
+   ```
+   → **Execute**. Copy the `id` from the response.
+2. Expand **`POST /runs/{run_id}/review`** → **Try it out** → paste the
+   `id` into `run_id`, and in the request body:
+   ```json
+   {"decision": "REJECTED", "comment": "Trying it out."}
+   ```
+   → **Execute**. You'll get `200` back with the recorded decision.
+3. Expand **`GET /runs/{run_id}`** → **Try it out** → same `run_id` →
+   **Execute**. You should see: `status: "REJECTED"`, `completed_at` now
+   set, `human_review` populated with your decision and comment, and a
+   new `audit_events` entry with `event_type: "human_review_recorded"`.
+
+**Approve a run** needs one extra step first, honestly: there's no
+orchestrator yet (Milestones 5–9 built the capture/agent/eval/guardrail
+tools standalone, not wired together — see `docs/architecture.md`), so a
+run created through `POST /runs` has no guardrail results, and a run with
+no guardrail results is treated the same as `BLOCKED` — you'll get a
+`409` if you try to approve one directly. To actually see an approval
+succeed, seed passing guardrail results for a run first (standing in for
+what a future orchestrator will do automatically):
+
+```bash
+python -c "
+from database.database import SessionLocal
+from database import crud
+
+RUN_ID = 'paste-a-real-run-id-here'
+session = SessionLocal()
+for name in ['CAPTURE_SUCCEEDED','CAPTURE_FRESH','MARKET_DATA_SUCCEEDED','MARKET_DATA_FRESH',
+             'ANALYSIS_SUCCEEDED','EVALUATION_SUCCEEDED','RISK_REWARD_MINIMUM',
+             'TRADE_PARAMS_VALID','UNCERTAINTY_ACCEPTABLE','SCORE_THRESHOLD','SYNTHETIC_DATA']:
+    crud.add_guardrail_result(session, run_id=RUN_ID, guardrail_name=name, passed=True, reason='manual seed')
+session.close()
+print('seeded')
+"
+```
+
+Then repeat step 3 above (`GET /runs/{run_id}`) to confirm
+`guardrail_outcome: "READY_FOR_REVIEW"`, and step 2 with
+`{"decision": "APPROVED", "comment": "..."}` — this time it succeeds.
+Try either decision a second time on the same run and you'll get a `409`
+— a decision is final, and the original is never overwritten.
+
 ## Status
 
-Milestone 9 of 12: deterministic guardrails. See
+Milestone 10 of 12: human approval and decision audit. See
 [docs/iterations.md](docs/iterations.md).

@@ -286,6 +286,52 @@ SECONDS`, `MIN_RISK_REWARD`, `MIN_TOTAL_SCORE`) come from `.env`, with
 MEDIUM-uncertainty ceiling (76) and the HIGH-uncertainty ceiling (52) —
 see the Milestone 9 entry in `docs/iterations.md` for the full reasoning.
 
+## Human review design
+
+`POST /runs/{run_id}/review` (`backend/api/routes_runs.py`) is the only
+code path anywhere in this application that can move a run to a final
+`APPROVED` or `REJECTED` state. It accepts exactly two fields — a
+`decision` and an optional `comment` — and does nothing else: it never
+re-runs the pipeline, never re-scores anything, never re-checks
+guardrails. It records a human's judgment about results that already
+exist.
+
+**A run's guardrail outcome isn't a stored column** — there's no
+orchestrator yet to compute and save one at pipeline-run time (Milestones
+5–9 were all deliberately built standalone, not wired in). Instead,
+`guardrails/rules.py`'s `outcome_from_results()` reconstructs the same
+`BLOCKED`/`REQUIRES_REVIEW`/`READY_FOR_REVIEW` outcome from a run's
+stored `GuardrailResult` rows, using the identical `BLOCKING_RULES`/
+`REVIEW_FORCING_RULES` classification the live guardrail pass uses — so
+"the outcome" is always derived the same way, whether freshly computed
+or reconstructed later from the database. A run with zero guardrail
+results (true for every run created through the API today, since
+nothing populates them yet) is treated the same as `BLOCKED` for
+approval purposes: no evidence a run wasn't blocked is not a reason to
+let it through.
+
+**Approval is gated; rejection never is.** `REJECTED` is permitted on
+any run, in any state, always — there's always something worth recording
+about why a human declined a setup. `APPROVED` is refused (`409`) if the
+outcome is `BLOCKED` or unknown — there's nothing to accept if the
+pipeline didn't produce something reviewable.
+
+**A decision is final.** `HumanReview.run_id` is a unique column (see
+Milestone 3) — a run that already has one is refused (`409`) on any
+further attempt, regardless of what the new decision would have been.
+The original decision, and its audit trail, are never touched.
+
+Every successful decision writes an `audit_events` row
+(`human_review_recorded`) and sets the run's `completed_at` to the exact
+same timestamp as the decision — the only two things a review touches
+besides the `human_reviews` row itself and `Run.status`.
+
+`GET /runs/{run_id}` was extended with a `guardrail_outcome` field
+(computed the same way, via `outcome_from_results()`) so a client can see
+a run's review state — the guardrail outcome, whether a decision exists,
+and what it was — from one response, without re-implementing any rule
+classification itself.
+
 ## Data flow (per run)
 
 ```
@@ -307,9 +353,10 @@ Database ── every step's input/output persisted as it happens
   ▲
   │  GET /runs/{id}
 Frontend ── shows screenshot, analysis, score, guardrail results
-  │  POST /runs/{id}/decision {approved|rejected}
+  │  POST /runs/{id}/review {decision: APPROVED|REJECTED, comment?}
   ▼
-Database ── run reaches terminal state
+Database ── run reaches terminal state (Milestone 10, built; wiring the
+             orchestrator steps above into a real pipeline is still open)
 ```
 
 ## Tech stack mapping

@@ -713,6 +713,88 @@ All 159 tests pass (19 database + 11 API + 17 capture + 19 market data +
 25 agent + 32 evaluation + 36 guardrails), confirmed stable across three
 consecutive full-suite runs after the timing-race fix.
 
+## Milestone 10 — Human approval and decision audit
+
+Built `POST /runs/{run_id}/review`: the only code path anywhere in this
+application that can move a run to a final `APPROVED`/`REJECTED` state.
+It records a human's judgment about results that already exist — it
+never re-runs anything.
+
+**The real design problem this milestone had to solve first: there's no
+stored guardrail outcome to check.** `guardrails/rules.py`'s
+`evaluate_guardrails()` computes a `GuardrailOutcome` live, but nothing
+persists that outcome anywhere — Milestones 5–9 were all deliberately
+built standalone, never wired into an orchestrator, so no run created
+through the API today has ever actually had guardrails run against it.
+The fix: `outcome_from_results()`, a new function in `guardrails/rules.py`
+that reconstructs the same outcome from a run's stored `GuardrailResult`
+rows, reusing the exact same `BLOCKING_RULES`/`REVIEW_FORCING_RULES`
+classification the live check uses — so "the outcome" means the same
+thing whether it's freshly computed or read back from the database.
+**A run with zero guardrail results is treated the same as `BLOCKED`**
+for approval purposes: no evidence a run wasn't blocked is not grounds to
+approve it. Since there's still no orchestrator, this means every run
+created through `POST /runs` today can only ever be `REJECTED` — never
+`APPROVED` — until something (a future milestone, or a test/manual seed)
+actually writes `GuardrailResult` rows for it. That's demonstrated
+directly below, not glossed over.
+
+- `backend/schemas.py` — `HumanReviewRequest` (`decision` +
+  optional `comment`, nothing else — no score field, no guardrail-outcome
+  field; extra fields in the request body are simply not part of the
+  schema and have zero effect) and `HumanReviewResponse`. `RunDetail`
+  gained a `guardrail_outcome` field (`"BLOCKED"` / `"REQUIRES_REVIEW"` /
+  `"READY_FOR_REVIEW"` / `null`), computed via `outcome_from_results()`,
+  not a real column.
+- `database/crud.py` — added `update_run_status()` (sets `Run.status`
+  and, optionally, `completed_at`), following the same one-function-one-
+  responsibility pattern as every other `crud.py` write.
+- `database/models.py` — `Run.status` and `HumanReview.decision`'s stale
+  comments (which said lowercase `"approved"`/`"rejected"`, left over
+  from a Milestone 3 placeholder) corrected to match actual usage:
+  uppercase, matching `"CREATED"` from Milestone 4.
+- `backend/api/routes_runs.py` — `review_run()`: 404 if the run doesn't
+  exist; 409 if it already has a decision (**checked before anything
+  else**, so a second attempt — approve or reject — is refused
+  identically and the original decision is never touched); for `APPROVED`
+  only, 409 if the outcome is `BLOCKED` or unknown; on success, writes the
+  `HumanReview` row, updates `Run.status` to the decision, sets
+  `Run.completed_at` to the exact same `decided_at` timestamp, and writes
+  a `human_review_recorded` audit event. `REJECTED` skips the outcome
+  check entirely — permitted on any run, in any state, per the
+  requirement.
+- `tests/test_api.py` — 14 tests added (25 total, up from 11): approve
+  and reject each store the decision/update status/write the audit event;
+  approving a `BLOCKED` run refused with a clear error, rejecting the
+  same run permitted; a run with zero guardrail results refused for
+  `APPROVED`, permitted for `REJECTED`; a `REQUIRES_REVIEW` run (not just
+  `READY_FOR_REVIEW`) can still be approved — only `BLOCKED` forbids it;
+  a second decision refused with the original decision and its single
+  audit event confirmed unchanged; 404 on a nonexistent run; 422 on an
+  invalid decision word; case-insensitive decision parsing; an attempt to
+  inject `total_score`/`guardrail_outcome`/`risk_reward_score` in the
+  request body confirmed to have no effect; timezone-aware UTC decision
+  and completion timestamps; and confirmation the endpoint never writes
+  capture/market-data/analysis/evaluation rows. Since no orchestrator
+  exists to populate real `GuardrailResult` rows, tests seed them
+  directly via `crud.add_guardrail_result()` through a `session_factory`
+  attribute added to the existing `client` fixture (additive only — the
+  original 11 Milestone 4 tests are untouched).
+
+Manually verified against a real running server, not just the test
+client (see README for the exact commands): created a run, rejected it
+immediately (works with zero guardrail data, as designed), created a
+second run, seeded 11 passing guardrail results by hand (standing in for
+what a future orchestrator will do automatically), confirmed
+`guardrail_outcome` read back as `"READY_FOR_REVIEW"`, approved it, and
+confirmed a second decision attempt on that same run was refused with
+`409` while the original `APPROVED` decision remained exactly as
+recorded.
+
+Not wired into the frontend (Milestone 11). All 173 tests pass (19
+database + 25 API + 17 capture + 19 market data + 25 agent + 32
+evaluation + 36 guardrails).
+
 ## Rebuilding the database
 
 `init_db()` only ever adds tables that don't exist yet — it never alters
@@ -744,6 +826,6 @@ isn't forgotten.
 7. ~~Agent loop~~
 8. ~~Evaluation~~
 9. ~~Guardrails~~
-10. Human approval
+10. ~~Human approval~~
 11. UI (incl. Tailwind migration)
 12. Testing

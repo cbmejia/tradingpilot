@@ -5,8 +5,12 @@
 # (rejecting anything that doesn't fit with a 422 error, never a crash)
 # and to shape outgoing responses consistently.
 #
-# Nothing here accepts a total evaluation score from the client -- there
-# is no schema for writing an Evaluation at all yet (that's Milestone 8).
+# Nothing here accepts a total evaluation score from the client, and
+# nothing here accepts a guardrail verdict from the client either -- the
+# human-review schema below has exactly two fields: a decision and an
+# optional comment. Everything else about a run's outcome (its score, its
+# guardrail results) is already computed and stored before a human ever
+# looks at it; reviewing a run cannot rewrite any of that.
 
 from __future__ import annotations
 
@@ -160,6 +164,53 @@ class RunDetail(RunSummary):
     guardrail_results: list[GuardrailResultOut] = []
     human_review: Optional[HumanReviewOut] = None
     audit_events: list[AuditEventOut] = []
+
+    # Derived, not a database column: "BLOCKED" / "REQUIRES_REVIEW" /
+    # "READY_FOR_REVIEW", computed from guardrail_results above using the
+    # same rule classification guardrails/rules.py uses live -- or None
+    # if no guardrail results exist for this run yet. Added so the review
+    # state (this + human_review above) is obvious from one response,
+    # without the client re-implementing the blocking/review-forcing
+    # rule split itself.
+    guardrail_outcome: Optional[str] = None
+
+
+# --- Human review (Milestone 10) ---
+
+ALLOWED_DECISIONS: frozenset[str] = frozenset({"APPROVED", "REJECTED"})
+
+
+class HumanReviewRequest(BaseModel):
+    """
+    What the client sends to POST /runs/{run_id}/review.
+
+    Deliberately just two fields. There is no field here for a score, a
+    guardrail outcome, or anything else about the run's results -- a
+    human supplies a decision and, optionally, why. Any other data in
+    the request body is ignored, not stored, and has no effect.
+    """
+
+    decision: str
+    comment: Optional[str] = Field(default=None, max_length=2000)
+
+    @field_validator("decision")
+    @classmethod
+    def decision_must_be_allowed(cls, value: str) -> str:
+        normalized = value.strip().upper()
+        if normalized not in ALLOWED_DECISIONS:
+            allowed = ", ".join(sorted(ALLOWED_DECISIONS))
+            raise ValueError(f"decision must be one of: {allowed}")
+        return normalized
+
+
+class HumanReviewResponse(BaseModel):
+    """What POST /runs/{run_id}/review sends back."""
+
+    run_id: str
+    decision: str
+    decided_at: datetime
+    comment: Optional[str]
+    run_status: str
 
 
 class RunListResponse(BaseModel):
