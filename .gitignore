@@ -57,4 +57,5 @@ Thumbs.db
 
 # --- Database ---
 *.sqlite3
+*.sqlite
 *.db

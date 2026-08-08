@@ -13,10 +13,11 @@
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from sqlalchemy import Boolean, Float, ForeignKey, String, Text
+from sqlalchemy import Boolean, CheckConstraint, Float, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from database.database import Base
+from database.types import TZDateTime
 
 
 def _new_run_id() -> str:
@@ -47,8 +48,8 @@ class Run(Base):
     # "rejected", "error") are defined by the orchestrator in Milestone 4 —
     # this column just stores whatever string it's given.
     status: Mapped[str] = mapped_column(String(30), default="pending")
-    created_at: Mapped[datetime] = mapped_column(default=_now)
-    completed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
+    completed_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
 
     captures: Mapped[list["Capture"]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
@@ -84,7 +85,7 @@ class Capture(Base):
     symbol: Mapped[str] = mapped_column(String(20))
     timeframe: Mapped[str] = mapped_column(String(10))
     screenshot_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
-    captured_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    captured_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
     status: Mapped[str] = mapped_column(String(10))  # "success" | "error"
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
@@ -100,7 +101,7 @@ class MarketData(Base):
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
     symbol: Mapped[str] = mapped_column(String(20))
     price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    timestamp: Mapped[datetime | None] = mapped_column(nullable=True)
+    timestamp: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
     source: Mapped[str] = mapped_column(String(50))
     status: Mapped[str] = mapped_column(String(10))  # "success" | "error"
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -126,7 +127,7 @@ class AgentAnalysis(Base):
     structure_assessment: Mapped[str] = mapped_column(String(200))
     setup_assessment: Mapped[str] = mapped_column(String(200))
     uncertainty: Mapped[str] = mapped_column(String(200))
-    timestamp: Mapped[datetime] = mapped_column(default=_now)
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
 
     run: Mapped["Run"] = relationship(back_populates="analyses")
 
@@ -135,13 +136,24 @@ class Evaluation(Base):
     """
     The deterministic rubric score for a run.
 
-    IMPORTANT: total_score is always computed by crud.add_evaluation() as
-    the sum of the five component scores below. Nothing writes to this
-    table any other way in this codebase, so there is no path — including
-    from the AI agent — that sets total_score directly.
+    IMPORTANT: total_score is meant to always be computed by
+    crud.add_evaluation() as the sum of the five component scores below.
+    That's enforced at the Python level, but Python-level discipline alone
+    can be bypassed by constructing Evaluation(...) directly with whatever
+    total_score you like — so the CHECK constraint below enforces the same
+    rule at the database level. SQLite will refuse to commit any row,
+    however it was created, where total_score doesn't equal the sum of the
+    five components.
     """
 
     __tablename__ = "evaluations"
+    __table_args__ = (
+        CheckConstraint(
+            "total_score = trend_score + structure_score + entry_score "
+            "+ risk_reward_score + timing_context_score",
+            name="ck_evaluations_total_score_is_sum_of_components",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
@@ -151,7 +163,7 @@ class Evaluation(Base):
     risk_reward_score: Mapped[int] = mapped_column()
     timing_context_score: Mapped[int] = mapped_column()
     total_score: Mapped[int] = mapped_column()
-    timestamp: Mapped[datetime] = mapped_column(default=_now)
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
 
     run: Mapped["Run"] = relationship(back_populates="evaluations")
 
@@ -166,7 +178,7 @@ class GuardrailResult(Base):
     guardrail_name: Mapped[str] = mapped_column(String(50))
     passed: Mapped[bool] = mapped_column(Boolean)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    timestamp: Mapped[datetime] = mapped_column(default=_now)
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
 
     run: Mapped["Run"] = relationship(back_populates="guardrail_results")
 
@@ -184,7 +196,7 @@ class HumanReview(Base):
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), unique=True)
     decision: Mapped[str] = mapped_column(String(20))  # "approved" | "rejected"
-    decided_at: Mapped[datetime] = mapped_column(default=_now)
+    decided_at: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     run: Mapped["Run"] = relationship(back_populates="human_review")
@@ -203,6 +215,6 @@ class AuditEvent(Base):
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
     event_type: Mapped[str] = mapped_column(String(50))
     event_message: Mapped[str] = mapped_column(Text)
-    timestamp: Mapped[datetime] = mapped_column(default=_now)
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
 
     run: Mapped["Run"] = relationship(back_populates="audit_events")

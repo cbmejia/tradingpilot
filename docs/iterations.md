@@ -61,6 +61,65 @@ No FastAPI routes, no orchestrator logic, no capture/market-data/agent/
 eval/guardrail implementations, and no frontend changes were made — this
 milestone is the database layer only.
 
+## Milestone 3 hardening — UTC timestamps, score boundary test, gitignore
+
+A verification pass over Milestone 3 found and closed two real gaps:
+
+- **Timestamps silently lost their timezone.** `_now()` in `models.py`
+  already used `datetime.now(timezone.utc)`, but SQLite has no native
+  datetime type — SQLAlchemy's default `DateTime` column stores it as
+  plain text and drops the UTC offset on write, so every timestamp came
+  back out of the database as naive (verified empirically: a `Run`'s
+  `created_at` had `tzinfo=None` immediately after `session.refresh()`).
+  Added `database/types.py` (`TZDateTime`, a `TypeDecorator`) that
+  requires timezone-aware input and always returns UTC-aware output.
+  Applied it to all 9 datetime columns across every model. This matters
+  because the future data-freshness guardrail (Milestone 9) will subtract
+  `captured_at` from "now" — Python raises an error subtracting an aware
+  datetime from a naive one, so this bug would have surfaced there as a
+  guardrail crash rather than a database problem.
+- **The evaluation score boundary was Python-convention-only, not
+  database-enforced.** `crud.add_evaluation()` never accepted a
+  `total_score` parameter, but constructing `Evaluation(...)` directly
+  (bypassing `crud.py`) could still set any `total_score` — confirmed
+  empirically. Added a SQLite `CHECK` constraint
+  (`ck_evaluations_total_score_is_sum_of_components`) so the database
+  itself rejects any row, however it's created, where `total_score` isn't
+  exactly the sum of the five component scores.
+
+Also added: `*.sqlite` to `.gitignore` (`*.sqlite3` and `*.db` were
+already covered; `.venv/` already was too). Confirmed the tradepilot repo
+has zero references to Simple_budget anywhere in its files, and gave it
+its own `.claude/launch.json` (relative paths only) so a session rooted
+directly in `tradepilot/` doesn't need anything from Simple_budget to
+preview the frontend.
+
+Four tests added to `tests/test_database.py` (18 total, up from 14):
+timestamp round-trip for both a caller-supplied timestamp (`Capture.
+captured_at`) and an auto-generated one (`Run.created_at`); the
+`add_evaluation` rejection test; and the database-level `CHECK` constraint
+test.
+
+## Rebuilding the database
+
+`init_db()` only ever adds tables that don't exist yet — it never alters
+an existing table. So if a model changes shape (a column is added,
+removed, or its type changes), the existing `database/tradepilot.db` file
+won't pick that up automatically. Since this is still a dev-only database
+with no real audit data to preserve, the fix is to delete the file and
+recreate it from the current models:
+
+```bash
+rm database/tradepilot.db          # PowerShell: Remove-Item database\tradepilot.db
+python -m database.init_db
+pytest                              # confirm the new schema is valid
+```
+
+Once real audit data needs to be preserved across a model change, delete-
+and-recreate stops being an option — that's when a migration tool (e.g.
+Alembic) would need to be introduced. Not needed yet; noted here so it
+isn't forgotten.
+
 ## Roadmap
 
 1. ~~Architecture~~

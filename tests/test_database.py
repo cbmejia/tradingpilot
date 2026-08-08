@@ -4,10 +4,12 @@
 # these never touches the real database/tradepilot.db file on disk.
 
 import inspect
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import sessionmaker
 
 from database import crud, models  # noqa: F401 -- models registers tables on Base.metadata
@@ -103,6 +105,51 @@ def test_save_capture_failure_records_error(session):
     assert "did not load" in capture.error_message
 
 
+def test_capture_timestamp_round_trips_as_timezone_aware_utc(session):
+    """
+    SQLite has no native datetime type -- by default SQLAlchemy stores
+    datetimes as plain text and drops the UTC offset entirely, so a value
+    that goes in timezone-aware comes back out naive. That would silently
+    break the freshness guardrail later (it needs to subtract captured_at
+    from "now", which raises an error -- or silently misbehaves -- if one
+    side has a timezone and the other doesn't). This test forces a real
+    round trip through the database (not just reading the same Python
+    object back) to prove that no longer happens.
+    """
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+    captured_at = datetime.now(timezone.utc)
+
+    capture = crud.add_capture(
+        session,
+        run_id=run.id,
+        capture_mode="demo",
+        symbol="EURUSD",
+        timeframe="1h",
+        status="success",
+        screenshot_path="screenshots/demo/eurusd_1h.png",
+        captured_at=captured_at,
+    )
+
+    session.expire(capture)
+    reloaded = session.get(models.Capture, capture.id)
+
+    assert reloaded.captured_at.tzinfo is not None
+    assert reloaded.captured_at.utcoffset() == timedelta(0)
+
+
+def test_run_created_at_round_trips_as_timezone_aware_utc(session):
+    """Same round-trip check as above, but for an auto-generated timestamp
+    (created_at uses the default=_now on the model, not a caller-supplied
+    value) -- confirms both kinds of timestamp are consistent."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    session.expire(run)
+    reloaded = session.get(models.Run, run.id)
+
+    assert reloaded.created_at.tzinfo is not None
+    assert reloaded.created_at.utcoffset() == timedelta(0)
+
+
 def test_save_market_data(session):
     run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
 
@@ -172,11 +219,71 @@ def test_save_evaluation_computes_total_score(session):
 def test_add_evaluation_has_no_total_score_parameter():
     """
     This is what actually enforces "the AI must not write the final
-    score": there is no parameter to pass one in through.
+    score" at the function level: there is no parameter to pass one in
+    through, so attempting to costs a TypeError before anything is saved.
     """
     params = inspect.signature(crud.add_evaluation).parameters
 
     assert "total_score" not in params
+
+
+def test_add_evaluation_rejects_a_smuggled_total_score(session):
+    """Directly proves the boundary: passing total_score into
+    add_evaluation() is rejected outright (Python raises before any SQL
+    runs), and a legitimately-saved evaluation's total always equals the
+    sum of its five components."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    with pytest.raises(TypeError):
+        crud.add_evaluation(
+            session,
+            run_id=run.id,
+            trend_score=18,
+            structure_score=15,
+            entry_score=12,
+            risk_reward_score=20,
+            timing_context_score=10,
+            total_score=999,  # not a real parameter -- must be rejected
+        )
+
+    evaluation = crud.add_evaluation(
+        session,
+        run_id=run.id,
+        trend_score=18,
+        structure_score=15,
+        entry_score=12,
+        risk_reward_score=20,
+        timing_context_score=10,
+    )
+
+    assert evaluation.total_score == 18 + 15 + 12 + 20 + 10
+
+
+def test_evaluation_check_constraint_rejects_mismatched_total_score(session):
+    """
+    Even bypassing crud.py entirely and constructing the Evaluation model
+    directly, the database itself refuses to store a total_score that
+    doesn't match the sum of the five components. This is the backstop
+    for the case where some future code (not crud.add_evaluation) ends up
+    building an Evaluation row by hand.
+    """
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    bad_evaluation = models.Evaluation(
+        run_id=run.id,
+        trend_score=1,
+        structure_score=1,
+        entry_score=1,
+        risk_reward_score=1,
+        timing_context_score=1,
+        total_score=9999,
+    )
+    session.add(bad_evaluation)
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+    session.rollback()
 
 
 def test_save_guardrail_result(session):
