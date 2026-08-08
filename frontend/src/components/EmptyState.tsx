@@ -3,5 +3,5 @@ interface EmptyStateProps {
 }
 
 export function EmptyState({ message }: EmptyStateProps) {
-  return <p className="empty-state">{message}</p>;
+  return <p className="text-sm leading-relaxed text-slate-500">{message}</p>;
 }

@@ -17,7 +17,7 @@ what's next.
 
 ## Structure
 
-- `frontend/` — React + TypeScript UI (Tailwind added when the UI milestone lands)
+- `frontend/` — React + TypeScript + Tailwind UI, wired to the real backend (Milestone 11)
 - `backend/` — FastAPI app: routes, orchestrator, request/response schemas
 - `agents/` — the trading agent (wraps the Claude call) and its prompt logic
 - `capture/` — chart capture tool: `CaptureProvider` interface, `DemoProvider` (offline fixtures), `LiveProvider` (Playwright), `CaptureManager` (picks one, never falls back)
@@ -31,10 +31,14 @@ what's next.
 - `docs/` — architecture, the evaluation rubric ([rubric.md](docs/rubric.md)), testing, and iteration notes
 - `tests/` — automated tests
 
-## Running the backend
+## Running the app
+
+Two servers, two terminals — the frontend talks to the backend over HTTP,
+so both need to be running.
+
+**Terminal 1 — backend:**
 
 ```bash
-cd backend  # not required, just for context -- run these from the repo root
 python -m venv .venv
 .venv\Scripts\activate          # macOS/Linux: source .venv/bin/activate
 pip install -r backend/requirements.txt
@@ -43,7 +47,19 @@ uvicorn backend.main:app --reload
 
 Open **http://127.0.0.1:8000/docs** for interactive API docs (Swagger UI) —
 you can create and fetch runs directly from the browser. Run `pytest` from
-the repo root to run the test suite.
+the repo root to run the backend test suite.
+
+**Terminal 2 — frontend:**
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Open **http://localhost:5173** for the real app. Run `npm test` from
+`frontend/` to run the frontend test suite (Vitest + React Testing
+Library — no real network calls in any test).
 
 ## Trying the chart capture tool by hand
 
@@ -255,14 +271,54 @@ response already reflects the finished run.
    `run_id` and you'll get `409` both times — an analysis, like a
    decision, is final and never silently re-run or overwritten.
 
+## Running a DEMO analysis in the UI
+
+The real, intended way to use this app. Start both servers (see "Running
+the app" above) with `CAPTURE_MODE=demo` and `MARKET_DATA_MODE=demo` in
+`.env` (the defaults). Open **http://localhost:5173**.
+
+1. In the **Analyze** panel (top left): leave **Symbol** as `EURUSD` and
+   **Timeframe** as `1h`. Set **Direction** to `long`, **Entry** to
+   `1.0950`, **Stop** to `1.0900`, **Target** to `1.1050` (a coherent
+   long setup with a 2.0 risk/reward ratio). Click **Analyze**.
+2. A **Pipeline progress** panel appears. Watch it — this is real,
+   polled progress, not an animation: **Chart capture** and **Market
+   data** turn green first (both instant, DEMO fixtures, no network),
+   then **Agent analysis** takes a few seconds (a real Claude call if
+   `ANTHROPIC_API_KEY` is set in `.env`; a fast, honest failure if it
+   isn't — either way you'll see it), then **Evaluation** and
+   **Guardrails** finish almost immediately after.
+3. Once finished, the right-hand panel fills in with everything: the
+   chart image, the market quote (price, source, and a **Demo data**
+   badge), the agent's prose plus its five categorical fields (trend
+   direction/quality, structure, setup, context risk, uncertainty), the
+   five component scores each shown next to the exact category that
+   produced it (e.g. **Trend: 14** next to `UP · STRONG`), the total
+   score, and all eleven guardrail results with their real pass/fail
+   reasons. A **Demo data — not real** badge appears wherever the run's
+   data came from DEMO mode — the header, the chart panel, the market
+   panel, and the review panel — impossible to mistake for a live
+   result.
+4. In the **Human review** panel at the bottom: if the guardrail outcome
+   is `BLOCKED`, **Approve** is disabled and the reason is printed right
+   above the buttons — only **Reject** works. Otherwise both are
+   enabled. Type an optional comment, then click **Reject** (or
+   **Approve**, if the outcome allows it). The decision appears
+   immediately (`Decision: REJECTED`, with a timestamp and your
+   comment), and both buttons become disabled — a decision is final, the
+   same as the backend enforces.
+5. Look at **Recent runs** in the left sidebar: the run now shows its
+   updated status (`REJECTED`/`APPROVED`) and its demo badge. Click it
+   again any time to see the same detail view reload from the real
+   `GET /runs/{id}` response.
+
+If the backend isn't running, step 1 shows a clear message ("Could not
+reach the TradePilot backend at http://127.0.0.1:8000. Is it running?")
+instead of hanging.
+
 ## Status
 
-Milestone 10.5 of 12: orchestrator wires the 12-step pipeline, plus three
-follow-up fixes — a failed agent analysis or evaluation is stored as a
-proper row (`status`/`error_message`, matching `captures`/`market_data`)
-instead of only being described in the audit trail; a successful
-analysis stores the five categorical fields the rubric actually scores
-from; and `market_data.mode` plus `evaluations.risk_reward_ratio` close
-out the schema audit, so every component score and every LIVE/DEMO claim
-now traces back to a real stored value, not an inference. See
-[docs/iterations.md](docs/iterations.md).
+Milestone 11 of 12: the frontend is wired to the real backend — analyze
+a symbol, watch real pipeline progress, see every score traced back to
+its evidence, and approve or reject the result, all from the browser.
+See [docs/iterations.md](docs/iterations.md).

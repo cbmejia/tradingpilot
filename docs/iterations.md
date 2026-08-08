@@ -1363,6 +1363,262 @@ produce: every field on every one of those five dataclasses now has a
 corresponding column somewhere in `database/models.py`. No remaining
 place where the pipeline computes something the schema can't store.
 
+## Milestone 11 — frontend wired to the backend
+
+Wired the React/TypeScript shell (Milestone 1) to the real API: submit a
+symbol → watch the real pipeline run → see the full result, traced back
+to its evidence → approve or reject it. Tailwind added, as deferred
+since Milestone 2. No backend business logic changed in this milestone
+beyond the one prerequisite below, which was flagged and approved before
+any frontend code was written.
+
+### Prerequisite: `GET /runs/{run_id}/screenshot`
+
+Before any UI work: `Capture.screenshot_path` is an absolute path on the
+*backend's* filesystem (e.g. `C:\Users\chris\tradepilot\screenshots\
+demo\EURUSD_1h.png`) — meaningless to a browser on its own, and the
+backend had no static file serving at all. Flagged as a real blocker (an
+endpoint the "don't add endpoints without telling me first" rule
+explicitly covers) before writing the chart-display component. Approved
+with an exact, security-conscious spec, implemented as given:
+
+- `backend/api/routes_runs.py` — `get_run_screenshot()`. The file to
+  serve is derived **entirely** from `run_id`: look up the run, read its
+  own `Capture` row, serve that file. No path, filename, or directory is
+  ever accepted from the client, in the URL, the query string, or
+  anywhere else — this is what rules path traversal out as a class of
+  bug here, rather than merely defending against it (verified directly:
+  a test sends `?path=/etc/passwd&filename=../../../secrets.txt` and
+  confirms the response is byte-identical to the same request without
+  those params).
+- **Deliberately not a static file mount.** `screenshots/` is never
+  exposed as a browsable directory — a LIVE capture is the user's own
+  chart and must not be enumerable by filename. Every request is scoped
+  to the one run it claims to belong to.
+- Before serving, the stored path is resolved (`Path.resolve()`, which
+  also collapses any `..` segments and follows symlinks) and checked
+  with `is_relative_to()` against `SCREENSHOTS_ROOT` — reusing
+  `capture/base.py`'s own `REPO_ROOT` rather than recomputing repo-root
+  detection a second way. A path resolving outside `screenshots/` is
+  refused with the same generic 404 every other "no image" case gets —
+  deliberately vague, so the response never confirms to a client that
+  path traversal specifically was what was attempted.
+- Every legitimate "no image right now" state is a clear `404`, never a
+  `500`: run doesn't exist, run has no capture yet, the capture's
+  `status` isn't `SUCCESS` (with the real `error_message` in the detail —
+  safe to be specific here, this isn't the security-sensitive case), or
+  the file is missing from disk (also safe to be specific: a legitimate
+  non-security failure, e.g. the file was moved after the row was
+  written).
+- Served via FastAPI's `FileResponse` with the content type resolved
+  from the file's extension (`mimetypes.guess_type`, falling back to
+  `application/octet-stream`).
+- `tests/test_api.py` — 7 tests added: a successful capture serves the
+  real demo fixture with `content-type: image/png`; a `FAILED` capture
+  returns `404` with the real error message; a `Capture` row pointing at
+  a file that doesn't exist on disk returns `404`, not `500`; a
+  nonexistent run returns `404`; a run with no capture at all returns
+  `404`; a stored path resolving outside `screenshots/` (a real file in
+  `tmp_path`, well outside the repo) is refused, and its bytes are
+  confirmed never to appear in the response; and the query-string-tricks
+  test described above.
+
+### The frontend
+
+`frontend/` gained a proper API layer, seven new components, and a
+rewritten `App.tsx` that owns all cross-component state; nothing renders
+a number it invented itself, everything comes from a `GET`/`POST`
+response.
+
+- `frontend/src/api/types.ts` — TypeScript interfaces mirroring every
+  `backend/schemas.py` response shape field-for-field, `| null` wherever
+  the Python side is `Optional[...]` — so a `FAILED` row's null fields
+  are a compile-time-visible case the UI has to handle, not an
+  assumption that quietly breaks at runtime.
+- `frontend/src/api/client.ts` — the only place the frontend calls
+  `fetch`. `ApiError` unifies "the backend answered with a non-2xx
+  status" and "the backend never answered at all" (network failure,
+  backend not running) into one catchable type with a clear message —
+  the second case is what satisfies "handle the backend being
+  unreachable with a clear message, not a silent hang."
+- **The ANALYZE flow (`App.tsx`'s `handleAnalyzeSubmit`)**: `POST /runs`
+  → `POST /runs/{id}/analyze`, exactly as specified. Because `/analyze`
+  is synchronous (Milestone 10.5: it doesn't return until the whole
+  pipeline has finished), a `setInterval` poll of `GET /runs/{id}` runs
+  *concurrently* with the in-flight `/analyze` request, not after it —
+  the orchestrator commits each stage's row as it happens, so the poll
+  can observe capture, then market data, then analysis, etc. appearing
+  one at a time even though the single `/analyze` response won't arrive
+  until every stage is done. The poll is stopped the moment `/analyze`
+  itself resolves (or throws), and that final response — not the last
+  poll tick — is treated as authoritative.
+- `components/PipelineProgress.tsx` — derives each of the five stages'
+  displayed status (pending / in progress / success / failed) purely
+  from whether that stage's row is present in the last `GET /runs/{id}`
+  response and, if present, its own `status` field. No timer, no
+  animation standing in for real progress — confirmed by a test that
+  renders a run with only a real `SUCCESS` capture and checks the
+  spinner has moved to exactly the next stage, not by counting elapsed
+  time.
+- `components/ScoreBreakdown.tsx` — the component the "trace a score to
+  its evidence" requirement is actually about: each of the four
+  category-based component scores renders in the same row as the
+  categorical field(s) that produced it (`trend_score` next to
+  `trend_direction` + `trend_quality`, etc. — the exact pairing
+  `docs/rubric.md` documents), and `risk_reward_score` renders next to
+  `risk_reward_ratio.toFixed(2)`, the same traceability for the one
+  component whose evidence is a number instead of a category word.
+  `FAILED` renders its `status` and real `error_message`, never blank
+  score fields.
+- `components/ChartCapturePanel.tsx`, `MarketDataPanel.tsx`,
+  `AgentAnalysisPanel.tsx`, `GuardrailResultsPanel.tsx` — one panel per
+  pipeline stage, each handling exactly three states honestly: no data
+  yet (`EmptyState`), `FAILED` (`ErrorNotice`, the real message from the
+  API), and `SUCCESS` (the real values). `ChartCapturePanel` additionally
+  handles the image itself failing to load (`<img onError>`) with the
+  same `ErrorNotice` treatment, not a broken-image icon.
+- `components/DemoBadge.tsx`'s `SourceModeBadge` — the one component
+  that renders the DEMO/LIVE label, used in the run list, the detail
+  view's chart/market-data panels, and the review panel, so the wording
+  can only ever say one thing in one place. A run counts as demo-sourced
+  if *either* its capture or its market data came from DEMO mode —
+  mirroring `guardrails/rules.py`'s own `SYNTHETIC_DATA` check exactly,
+  not a separate frontend judgment call.
+- `components/ReviewPanel.tsx` — `APPROVE` is disabled (with the reason
+  shown on screen) when a decision already exists, when the guardrail
+  outcome is `BLOCKED`, or when there's no guardrail outcome yet at all
+  (mirrors `backend/api/routes_runs.py`'s own gating exactly — a run
+  with zero guardrail results is treated the same as `BLOCKED`).
+  `REJECT` is disabled only once a decision already exists — otherwise
+  always available, matching the backend's "REJECTED is permitted on any
+  run, in any state" rule. When a decision exists, it's shown (`Decision:
+  APPROVED/REJECTED`, timestamp, comment) instead of the input controls.
+- **`components/RunList.tsx` — a real design tradeoff, not a shortcut.**
+  `GET /runs` (`RunSummary`) has no `mode` or `guardrail_outcome` field
+  of its own — only `GET /runs/{id}` (`RunDetail`) does. Enriching
+  `RunSummary` to carry either would be a backend change, which wasn't
+  pre-approved for this milestone. Two things made a pure-frontend
+  workaround the right call instead of asking a second time: (1)
+  `Run.status` already *is* the guardrail outcome for any analyzed run —
+  `backend/orchestrator.py` (Milestone 10.5) sets it to exactly
+  `BLOCKED`/`REQUIRES_REVIEW`/`READY_FOR_REVIEW`, then a human review
+  overwrites it to `APPROVED`/`REJECTED`, which is strictly more useful
+  in a list than the pre-review outcome alone — so `status` alone
+  already satisfies "recent runs with their guardrail outcome and
+  status." (2) The DEMO label genuinely has no equivalent on
+  `RunSummary`, so `App.tsx`'s `loadRunList()` fires one `GET
+  /runs/{id}` per visible row (`Promise.all`, bounded to the list's page
+  size of 10) purely to read `capture_mode`/`mode` for the badge — zero
+  backend changes, at the cost of N extra requests for a small, capped
+  N. Worth knowing about if the list ever needs to show more than a
+  couple dozen rows: at that point, adding `guardrail_outcome`/`is_demo`
+  to `RunSummary` server-side would be the better trade, but that's a
+  backend decision, not one to make unilaterally here.
+- **Tailwind v4**, added via `@tailwindcss/vite` (no `postcss.config.js`
+  or `tailwind.config.js` needed at this version) — `index.css` is now
+  just `@import "tailwindcss";` plus the handful of CSS custom
+  properties worth keeping as a single source of truth for the palette.
+  `Card.tsx`/`EmptyState.tsx` (Milestone 1) rewritten in Tailwind
+  utility classes rather than left on the old hand-rolled CSS, so the
+  shell isn't half-migrated.
+- **Testing tooling added**: Vitest + React Testing Library +
+  `@testing-library/user-event` + jsdom. One real gotcha hit during
+  setup: `vitest@4` pulled in its own nested `vite@8` (via
+  `@vitest/mocker`) alongside the project's `vite@5.4`, and every test
+  run hung for 60s before failing with a worker-pool timeout. Fixed by
+  pinning `vitest@^2.1.9`, the last major compatible with Vite 5 — not a
+  code bug, a dependency-resolution mismatch. `vite.config.ts` imports
+  `defineConfig` from `"vitest/config"` rather than `"vite"` specifically
+  so the `test` key type-checks under `tsc -b`.
+
+### Tests
+
+27 frontend tests across 8 files, all against mocked `fetch`/mocked
+`api/client` — no test in this milestone makes a real network call:
+
+- `ReviewPanel.test.tsx` — `APPROVE` disabled + reason shown when
+  `BLOCKED` (`REJECT` enabled); `APPROVE` enabled when
+  `READY_FOR_REVIEW` with no decision; both disabled once a decision
+  exists, with the decision shown; the demo notice renders when
+  `isDemo`; clicking Approve calls `onApprove` with the typed comment.
+- `ChartCapturePanel.test.tsx` — empty state with no capture; the real
+  error message (not an empty state, not a broken image) for a `FAILED`
+  capture; the image and a DEMO label for a successful demo capture; no
+  demo label for a successful LIVE capture.
+- `AgentAnalysisPanel.test.tsx` — empty state; `status: FAILED` and the
+  real error message (not blank fields) for a failed analysis; all five
+  categorical fields plus prose for a successful one.
+- `ScoreBreakdown.test.tsx` — empty state; `FAILED` status and message
+  for a failed evaluation; **the adjacency test** — queries each score
+  row by `data-testid` and asserts the score and its categorical
+  evidence (or, for Risk/Reward, the ratio formatted to two decimals)
+  are both present *within that same row*, not just somewhere on the
+  page.
+- `DemoBadge.test.tsx`, `RunList.test.tsx` — the demo label renders for
+  `DEMO`, never for `LIVE`, in both the standalone badge and the run
+  list; the list shows a clear error (not a hang) when it fails to load.
+- `PipelineProgress.test.tsx` — the spinner sits on exactly the first
+  stage with no data yet; moves on once real capture data arrives; no
+  stage is "in progress" before analysis has started.
+- `App.test.tsx` — the full `fetch`-free integration path: submitting
+  the form calls `createRun` → `getRun` → `analyzeRun` in order and
+  renders the finished run (including its demo label and total score,
+  both straight from the mocked `analyzeRun` response); a `BLOCKED` run
+  reached via the run list shows its failed capture's real error where
+  the chart would be, `APPROVE` disabled, and a successful `REJECT`
+  call; a backend-unreachable `listRuns` rejection renders the clear
+  "could not reach the backend" message instead of an empty or hung
+  list.
+
+Backend: 7 new tests for the screenshot endpoint (listed above). All
+211 backend tests pass (24 database + 32 API + 17 capture + 19 market
+data + 25 agent + 32 evaluation + 36 guardrails + 10 orchestrator).
+
+### Manual verification
+
+Ran a real end-to-end DEMO analysis through the actual browser (not just
+`TestClient`): started both dev servers, filled in the ANALYZE form
+(EURUSD, 1h, long, entry/stop/target for RR 2.0), and watched real
+mid-flight progress — capture and market data showed complete with their
+DEMO badges *while the agent request was still in flight* (a real Claude
+call; `ANTHROPIC_API_KEY` is set locally), proving the concurrent-poll
+design actually shows real intermediate state, not a fake animation.
+Once finished: the chart image rendered (served through the new
+screenshot endpoint), all five categorical fields and their prose
+appeared, all five scores rendered next to their evidence
+(`trend_score` next to `UP · WEAK`, `risk_reward_score` next to
+`ratio 2.00`, etc. — a real `WEAK`/`MIXED`/`MARGINAL`/`MODERATE` analysis
+this time, scoring 45/100), and all eleven guardrail results listed with
+their real reasons, including `SCORE_THRESHOLD` and `SYNTHETIC_DATA`
+failing (both review-forcing, not blocking) — so the outcome was
+`REQUIRES_REVIEW`, and `APPROVE` was correctly enabled, not disabled.
+The run list showed the run with that status and its DEMO badge. Clicked
+**Reject** anyway, to exercise that path specifically: the decision
+recorded, both `APPROVE`/`REJECT` buttons became disabled immediately
+(confirmed via direct DOM inspection, not just visually), the decision
+and its timestamp appeared in the review panel, and the run list's row
+updated to `REJECTED` — all without a page reload. Dev database reset to
+empty afterward.
+
+### What works end to end, and what doesn't
+
+**Works:** create a run → analyze it (real DEMO capture, real DEMO
+market data, real-or-honestly-failed agent call) → watch real per-stage
+progress → see the chart, quote, prose, categories, every score next to
+its evidence, and all eleven guardrail results → approve or reject it →
+see the decision persist and the run list update. A DEMO run is labeled
+unmistakably everywhere it appears. A failed stage at any point shows
+its real error, never a blank section or a hang.
+
+**Doesn't (out of scope for this milestone, not attempted):** no
+automatic refresh of a run already open in another tab; the run list is
+capped at the most recent 10 and has no pagination controls in the UI
+(the API supports paging; the UI doesn't expose it yet); a LIVE-mode
+walkthrough wasn't exercised (would need a real browser capture and an
+Alpha Vantage key); Milestone 12 (frontend test coverage beyond what's
+listed above, and any end-to-end/browser-automation pass) hasn't
+started.
+
 ## Rebuilding the database
 
 `init_db()` only ever adds tables that don't exist yet — it never alters
@@ -1396,5 +1652,5 @@ isn't forgotten.
 9. ~~Guardrails~~
 10. ~~Human approval~~
 10.5. ~~Orchestrator~~
-11. UI (incl. Tailwind migration)
+11. ~~UI (incl. Tailwind migration)~~
 12. Testing

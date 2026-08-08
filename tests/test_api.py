@@ -432,3 +432,127 @@ def test_review_endpoint_does_not_write_capture_market_data_or_evaluation_rows(c
     assert full_run["market_data"] == []
     assert full_run["analyses"] == []
     assert full_run["evaluations"] == []
+
+
+# ---------------------------------------------------------------------------
+# Milestone 11 prerequisite — GET /runs/{run_id}/screenshot
+#
+# The path served is derived entirely from the run's own stored Capture
+# row, never from anything the client supplies -- these tests confirm
+# every "no image right now" state returns a clear 404 (never a 500),
+# and that a stored path outside screenshots/ is refused rather than
+# served.
+# ---------------------------------------------------------------------------
+
+
+def _seed_capture(client, run_id: str, **overrides) -> None:
+    from capture.base import CaptureMode, CaptureStatus
+
+    defaults = dict(
+        capture_mode=CaptureMode.DEMO.value,
+        symbol="EURUSD",
+        timeframe="1h",
+        status=CaptureStatus.SUCCESS.value,
+        screenshot_path=None,
+        error_message=None,
+    )
+    defaults.update(overrides)
+    session = client.session_factory()
+    try:
+        crud.add_capture(session, run_id=run_id, **defaults)
+    finally:
+        session.close()
+
+
+def test_screenshot_endpoint_serves_the_image_with_correct_content_type(client):
+    from capture.demo_provider import DemoProvider
+
+    created = client.post("/runs", json=VALID_RUN_PAYLOAD).json()
+    real_capture = DemoProvider().capture("EURUSD", "1h")
+    assert real_capture.status.value == "SUCCESS"  # sanity check on the fixture itself
+    _seed_capture(client, created["id"], screenshot_path=real_capture.screenshot_path)
+
+    response = client.get(f"/runs/{created['id']}/screenshot")
+
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "image/png"
+    assert len(response.content) > 0
+
+
+def test_screenshot_endpoint_returns_404_with_clear_reason_when_capture_failed(client):
+    created = client.post("/runs", json=VALID_RUN_PAYLOAD).json()
+    _seed_capture(
+        client,
+        created["id"],
+        status="FAILED",
+        screenshot_path=None,
+        error_message="No demo fixture for ZZZINVALID 1h.",
+    )
+
+    response = client.get(f"/runs/{created['id']}/screenshot")
+
+    assert response.status_code == 404
+    assert "ZZZINVALID" in response.json()["detail"]
+
+
+def test_screenshot_endpoint_returns_404_not_500_when_file_missing_from_disk(client):
+    from capture.base import DEMO_DIR
+
+    created = client.post("/runs", json=VALID_RUN_PAYLOAD).json()
+    missing_path = str(DEMO_DIR / "DOES_NOT_EXIST_1h.png")
+    _seed_capture(client, created["id"], screenshot_path=missing_path)
+
+    response = client.get(f"/runs/{created['id']}/screenshot")
+
+    assert response.status_code == 404
+    assert "missing" in response.json()["detail"].lower()
+
+
+def test_screenshot_endpoint_returns_404_for_nonexistent_run(client):
+    response = client.get("/runs/does-not-exist/screenshot")
+
+    assert response.status_code == 404
+
+
+def test_screenshot_endpoint_returns_404_when_run_has_no_capture_yet(client):
+    created = client.post("/runs", json=VALID_RUN_PAYLOAD).json()
+
+    response = client.get(f"/runs/{created['id']}/screenshot")
+
+    assert response.status_code == 404
+
+
+def test_screenshot_endpoint_refuses_a_path_resolving_outside_screenshots_directory(client, tmp_path):
+    """A stored path pointing anywhere outside screenshots/ -- whether
+    from a bug or a tampered row -- is refused, never served, and the
+    refusal looks identical to any other "no image" case."""
+    outside_file = tmp_path / "not_a_real_chart.png"
+    outside_file.write_bytes(b"not actually a chart")
+
+    created = client.post("/runs", json=VALID_RUN_PAYLOAD).json()
+    _seed_capture(client, created["id"], screenshot_path=str(outside_file))
+
+    response = client.get(f"/runs/{created['id']}/screenshot")
+
+    assert response.status_code == 404
+    assert response.content != b"not actually a chart"
+
+
+def test_screenshot_endpoint_accepts_no_client_supplied_path_or_filename(client):
+    """Query-string tricks aiming at a different file have zero effect --
+    there is no path/filename parameter anywhere on this endpoint, only
+    run_id, so the response is identical with or without them."""
+    from capture.demo_provider import DemoProvider
+
+    created = client.post("/runs", json=VALID_RUN_PAYLOAD).json()
+    real_capture = DemoProvider().capture("EURUSD", "1h")
+    _seed_capture(client, created["id"], screenshot_path=real_capture.screenshot_path)
+
+    plain = client.get(f"/runs/{created['id']}/screenshot")
+    with_query_tricks = client.get(
+        f"/runs/{created['id']}/screenshot",
+        params={"path": "/etc/passwd", "filename": "../../../secrets.txt", "file": "C:\\Windows\\win.ini"},
+    )
+
+    assert plain.status_code == with_query_tricks.status_code == 200
+    assert plain.content == with_query_tricks.content

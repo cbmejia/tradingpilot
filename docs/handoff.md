@@ -8,17 +8,24 @@ the root [README.md](../README.md).
 
 ## 1. Current state
 
-- **Milestones 1–10.5 are complete**, including all three Milestone
-  10.5 follow-up fixes (failure states on analysis/evaluation records;
-  persisting the agent's categorical observations; storing market-data
-  mode and the risk/reward ratio). Milestone 11 (UI, including the
-  Tailwind migration) is next. Milestone 12 (testing) is after that.
-- **Latest commit:** "Milestone 10.5 fix 3 - store market data mode and
-  risk reward ratio".
-- **Test count:** 197 tests, all passing (33 database + 25 API + 17
-  capture + 19 market data + 25 agent + 32 evaluation + 36 guardrails +
-  10 orchestrator). See the roadmap checklist at the bottom of
+- **Milestones 1–11 are complete.** Milestone 12 (testing) is next.
+- **Latest commit:** "Milestone 11 - frontend wired to backend".
+- **Test count:** 211 backend tests + 27 frontend tests, all passing.
+  Backend: 24 database + 32 API + 17 capture + 19 market data + 25 agent
+  + 32 evaluation + 36 guardrails + 10 orchestrator. Frontend: 27 tests
+  across 8 files (Vitest + React Testing Library), none making a real
+  network call. See the roadmap checklist at the bottom of
   [docs/iterations.md](iterations.md) for the full milestone list.
+- **The frontend is wired to the real backend.** Submit a symbol in the
+  UI → it creates a run, runs the real pipeline, and shows the real
+  result: chart image, market quote, agent prose and categories, every
+  score next to the evidence that produced it, all eleven guardrail
+  results, and working approve/reject. Nothing in the UI computes a
+  number itself. See the "Milestone 11" entry in
+  [docs/iterations.md](iterations.md) for the full breakdown, including
+  the one backend prerequisite it needed (`GET /runs/{run_id}/screenshot`
+  — the only way a browser can display a chart image that lives on the
+  backend's own filesystem).
 - **The orchestrator exists.** `backend/orchestrator.py`'s
   `run_pipeline()`, called via `POST /runs/{run_id}/analyze`, actually
   runs capture → market data → agent → evaluation → guardrails in order
@@ -27,34 +34,16 @@ the root [README.md](../README.md).
   `evals/trade_evaluator.py`, and `guardrails/rules.py` themselves are
   unchanged — still standalone, independently callable modules; the
   orchestrator only calls them in sequence.
-- **`agent_analyses` and `evaluations` now carry `status`/
-  `error_message`**, matching `captures`/`market_data`, and a `FAILED`
-  row is a real row (never zeros, never a fabricated string) rather than
-  something only visible in `audit_events`.
-- **`agent_analyses` also now stores the five categorical fields**
-  (`trend_direction`, `trend_quality`, `structure_quality`,
-  `setup_quality`, `context_risk`) the v2 rubric actually scores from —
-  so a completed run's component scores (e.g. `trend_score: 14`) can be
-  traced back to the observation that produced them, not just trusted as
-  a number. Enforced both at the database level (a `CHECK` constraint
-  per field) and the application level (`database/crud.py` validates
-  before writing) — see the "Milestone 10.5 fix" and "Milestone 10.5 fix
-  2" entries in [docs/iterations.md](iterations.md) for the full
-  reasoning on both this and the status/error_message fix.
-- **The schema audit is clean.** Fix 2's audit across all eight tables
-  found two gaps (`market_data` had no `mode` column, `evaluations` had
-  no `risk_reward_ratio` column); fix 3 closed both. `market_data.mode`
-  is now a real `NOT NULL` column, constrained to `LIVE`/`DEMO` at both
-  the database level (`CHECK`) and the application level
-  (`database/crud.py`). `evaluations.risk_reward_ratio` is now a nullable
-  `Float`, populated on `SUCCESS`, `NULL` on `FAILED`, kept out of the
-  original integer sum-rule `CHECK` constraint and enforced by its own
-  independent nullability constraint instead. Every field every pipeline
-  dataclass produces now has a corresponding column somewhere in
-  `database/models.py` — see the "Milestone 10.5 fix 3" entry in
-  [docs/iterations.md](iterations.md).
-- See "How to run everything" below for the exact request sequence to
-  exercise the pipeline by hand.
+- **The schema is complete.** `agent_analyses` and `evaluations` both
+  carry `status`/`error_message` (a `FAILED` row is a real row, never
+  zeros, never a fabricated string); `agent_analyses` stores the five
+  categorical fields the rubric scores from; `market_data.mode` and
+  `evaluations.risk_reward_ratio` closed the last two gaps found by the
+  Milestone 10.5 fix 2 audit. Every field every pipeline dataclass
+  produces now has a corresponding column — see the three "Milestone
+  10.5 fix" entries in [docs/iterations.md](iterations.md).
+- See "How to run everything" below for the exact commands to start both
+  servers and exercise the app.
 
 ## 2. The non-negotiable invariants
 
@@ -149,7 +138,9 @@ Brief pointers only — full detail is in the matching
 
 ## 5. How to run everything
 
-Windows PowerShell, from the repo root:
+Windows PowerShell, from the repo root. **Two servers, two terminals:**
+
+Terminal 1 — backend:
 
 ```powershell
 python -m venv .venv
@@ -161,9 +152,20 @@ pytest
 uvicorn backend.main:app --reload
 ```
 
-With the server running, open **http://127.0.0.1:8000/docs** for
-interactive API docs. See the README for hand-run examples of each
-standalone tool:
+Terminal 2 — frontend:
+
+```powershell
+cd frontend
+npm install
+npm test
+npm run dev
+```
+
+Open **http://localhost:5173** for the real app, and
+**http://127.0.0.1:8000/docs** for interactive API docs (Swagger UI) if
+you want to call the backend directly instead. See the README for
+hand-run examples of each standalone tool, and for the exact
+click-by-click steps to run one DEMO analysis end to end in the UI:
 
 - [Chart capture (DEMO and LIVE)](../README.md#trying-the-chart-capture-tool-by-hand)
 - [Market data (DEMO and LIVE)](../README.md#trying-the-market-data-tool-by-hand)
@@ -171,25 +173,27 @@ standalone tool:
 - [Scoring an evaluation](../README.md#scoring-an-evaluation-by-hand)
 - [Checking guardrails](../README.md#checking-guardrails-by-hand)
 - [Running a full analysis pipeline, then approving/rejecting it, from `/docs`](../README.md#running-a-full-analysis-pipeline-by-hand)
+- [Running one DEMO analysis end to end in the UI](../README.md#running-a-demo-analysis-in-the-ui)
 
 ## 6. What is not built yet
 
-- **Milestone 11 — UI (including the Tailwind migration).** Milestone
-  1 shipped a React/TypeScript dashboard shell with hand-rolled CSS
-  and designed empty states, but no live data and no backend calls.
-  This milestone wires the frontend to the real API — create a run,
-  call `POST /runs/{id}/analyze`, poll/fetch it, show the
-  screenshot/analysis/score/guardrail results, and the approve/reject
-  controls — and migrates the shell's styling to Tailwind, which the
-  stack has specified since Milestone 2 but was deliberately deferred
-  to avoid churning the shell twice. The orchestrator this milestone
-  needs (Milestone 10.5) is already done.
 - **Milestone 12 — Testing.** What this covers beyond the substantial
-  unit-test suite that already exists (197 tests across every backend
-  module, including the orchestrator) isn't yet decided — likely
-  candidates are frontend tests and an end-to-end pass, but that should
-  be scoped as its own milestone discussion, not assumed here.
+  test suite that already exists (211 backend tests + 27 frontend
+  tests) isn't yet decided — likely candidates are broader frontend
+  coverage and a real end-to-end/browser-automation pass, but that
+  should be scoped as its own milestone discussion, not assumed here.
+- **Known, deliberate scope limits from Milestone 11** (not gaps,
+  documented tradeoffs — see that entry in
+  [docs/iterations.md](iterations.md) for the reasoning): the run list
+  is capped at the 10 most recent runs with no pagination controls in
+  the UI yet (the API already supports paging); a run open in one
+  browser tab doesn't auto-refresh if changed elsewhere; the DEMO label
+  and outcome shown in the run list come from `Run.status` plus one
+  `GET /runs/{id}` per visible row rather than a dedicated field on
+  `RunSummary` — fine at the current list size, worth revisiting with a
+  backend change if the list ever needs to show many more rows; a
+  LIVE-mode UI walkthrough wasn't exercised (needs a real browser
+  capture and an Alpha Vantage key).
 - **No known schema gaps remain.** The eight-table audit from Milestone
-  10.5 fix 2 found two gaps; fix 3 closed both (see section 1 above).
-  Nothing currently prevents Milestone 11 from building against the full
-  `GET /runs/{id}` shape.
+  10.5 fix 2 found two gaps; fix 3 closed both. Every field every
+  pipeline dataclass produces now has a corresponding column.

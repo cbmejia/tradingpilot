@@ -1,3 +1,5 @@
+@import "tailwindcss";
+
 :root {
   --bg: #0b0d10;
   --surface: #14171c;
@@ -5,6 +7,9 @@
   --text: #e7e9ec;
   --text-muted: #8b939f;
   --accent: #3b82f6;
+  --success: #22c55e;
+  --danger: #ef4444;
+  --warning: #f59e0b;
   color-scheme: dark;
 }
 
