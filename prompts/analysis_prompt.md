@@ -21,8 +21,15 @@ what the chart shows.
 
 ## What to do
 
-Look at the chart image. Describe, in your own words:
+Look at the chart image. Describe, in your own words, in **1-3 sentences
+per point below — not a paragraph**. The categories you classify further
+down are what the scoring engine actually reads; your prose here is only
+for a human reviewer, so there is no reason for it to run long, and a
+long answer is not a better answer:
 
+- **Overall analysis** (`analysis_text`) — 1-3 sentences summarizing the
+  setup as a whole. This is not a place to repeat the trend/structure/
+  setup points below at length — keep it short.
 - **Trend** — what direction is price moving in, on this timeframe?
 - **Structure** — what does the price structure look like (e.g. higher
   highs/lows, a range, a key level being tested)?
@@ -73,4 +80,6 @@ represents confidence or quality — that is computed separately, by code,
 never by you. Every category field must be exactly one of its listed
 options — never a number, never a word outside that list. Do not
 recommend placing a trade or phrase anything as an instruction to buy or
-sell — describe only what is observable.
+sell — describe only what is observable. Keep every prose field to a few
+sentences at most — the category fields above are what get scored, not
+how much you write.

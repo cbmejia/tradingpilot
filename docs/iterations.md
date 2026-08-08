@@ -1887,6 +1887,136 @@ and-recreate stops being an option — that's when a migration tool (e.g.
 Alembic) would need to be introduced. Not needed yet; noted here so it
 isn't forgotten.
 
+## fix: agent response truncation on live runs
+
+Post-6C-baseline defect fix, scoped narrowly per the working agreement —
+no new milestone, no behavior change beyond what the fix needed.
+
+**The bug, as reported from a real LIVE run:** capture succeeded in 14s,
+market data succeeded (a real Alpha Vantage quote, `1.15624998`, 16s
+old), all four upstream guardrails passed — and the agent stage still
+came back `FAILED` with `"Claude's response could not be used: response
+was not valid JSON: Unterminated string starting at: line 3 column 23
+(char 1241)"`.
+
+**Diagnosis, not assumption.** The instruction was explicit: verify
+before concluding this was `max_tokens` truncation rather than some other
+malformed-response cause. `agents/trade_agent.py` had never inspected
+`response.stop_reason` at all — every parse failure, whatever its real
+cause, produced the identical generic `"response was not valid JSON"`
+message. That gap was fixed first (see below), specifically so future
+occurrences of this bug diagnose themselves instead of requiring this
+same manual reasoning again. Once addable, `stop_reason` on a real
+follow-up LIVE call confirmed `"max_tokens"` directly — not inferred
+from the truncation point.
+
+**Root cause, once actually visible:** `DEFAULT_MAX_TOKENS` was `1024`,
+and `prompts/analysis_prompt.md`'s `analysis_text` field had **no length
+guidance at all** — not even a mention of what it should contain, let
+alone a bound — while the four other "What to do" bullets (Trend,
+Structure, Setup, Uncertainty) had specific prompts but likewise no
+sentence limit. `analysis_text` is also the *first* key in the JSON
+template, so a verbose, unbounded response there could consume the
+entire token budget before the model ever reached the five categorical
+fields the rubric actually scores from — precisely the failure mode this
+bug report showed (cut off at char 1241, well into what was very likely
+`analysis_text` still being written).
+
+**The fix, three parts, exactly as scoped — no retry logic, no
+partial-JSON recovery, a truncated or malformed response is still and
+will always be a `FAILED` analysis:**
+
+1. **`stop_reason` is now checked before parsing, not after.**
+   `TradeAgent.analyze()` extracts the response text, then checks
+   `getattr(response, "stop_reason", None) == "max_tokens"` *before*
+   calling `_parse_response()`. If true, the analysis fails immediately
+   with a distinct message naming the real cause explicitly:
+   `"Claude's response was truncated: generation stopped because it hit
+   the max_tokens limit (N) before finishing (stop_reason='max_tokens'),
+   not because of a parsing problem..."` — never routed through the
+   generic JSON-parse error path. `getattr(..., None)` rather than a
+   direct attribute access, so a response object that doesn't carry
+   `stop_reason` at all (not a real anthropic SDK shape, but defensive
+   regardless) can't crash the agent — it's simply treated as
+   not-truncated and parsed normally.
+2. **`max_tokens` raised from `1024` to `2048`, and made an actual
+   constructor parameter** (`TradeAgent(max_tokens=...)`, mirroring the
+   existing `timeout_seconds` pattern) rather than a hardcoded literal at
+   the API call site — so it's both configurable and quotable in the
+   truncation error message (the real configured limit, not a
+   restated constant). Sizing: four prose fields bounded to 1-3
+   sentences each (see below) plus five one-word categorical fields plus
+   JSON structure overhead comes to roughly 400-800 tokens for a
+   realistic response; 2048 leaves a comfortable ~2.5-5x margin above
+   that without inviting runaway generation. This is not a guess dressed
+   up as sizing — it's the actual shape of the JSON schema
+   `agents/trade_agent.py` requires, counted field by field.
+3. **`prompts/analysis_prompt.md` tightened, since raising `max_tokens`
+   alone would only move the ceiling, not fix the actual habit of
+   writing unbounded prose:**
+   - The "What to do" section now opens with an explicit "1-3 sentences
+     per point below — not a paragraph" instruction, applying to every
+     prose field.
+   - `analysis_text` — previously present in the JSON template with
+     literally no description anywhere in the prompt — now has its own
+     bullet: "1-3 sentences summarizing the setup as a whole... not a
+     place to repeat the trend/structure/setup points below at length."
+   - A closing reminder was added alongside the existing "no score, no
+     trade instruction" rules: "Keep every prose field to a few
+     sentences at most — the category fields above are what get scored,
+     not how much you write." This doesn't change what's scored (the
+     rubric has read only the categorical fields since the Milestone 8
+     revision) — it just makes that fact explicit to the model itself,
+     since nothing before this fix ever told it prose length was
+     pointless to optimize for.
+
+`system_prompt.md` and the categorical-field rubric itself were **not**
+touched — this is a prompt-brevity and response-handling fix, not a
+scoring or rules change.
+
+- `tests/test_agent.py` — 6 tests added (31 total, up from 25):
+  a truncated response (`stop_reason="max_tokens"`) is reported with
+  "truncated"/"max_tokens"/the real configured limit in the message, and
+  never the generic "not valid JSON" wording; a *well-formed* JSON
+  response that nonetheless carries `stop_reason="max_tokens"` is still
+  treated as a failure with every field `None` (proving this fix adds no
+  partial-JSON recovery — truncation is checked before parsing succeeds
+  or fails, not as a fallback after a parse error); a normal
+  `stop_reason="end_turn"` response is not misreported as truncated; a
+  response object missing `stop_reason` entirely doesn't crash and
+  parses normally; `max_tokens` defaults to `2048` and is actually passed
+  to `client.messages.create()`; `max_tokens` is configurable via the
+  constructor and the configured value is what's actually sent. The
+  existing `_fake_client()` test helper gained a `stop_reason` parameter
+  defaulting to `"end_turn"` (what a real complete response actually
+  carries) so every pre-existing test reflects a realistic response
+  shape without needing individual changes.
+
+All 224 backend tests pass (33 database + 32 API + 17 capture + 19
+market data + 31 agent + 32 evaluation + 36 guardrails + 10
+orchestrator + 14 failure scenarios — up from 218). All 32 frontend
+tests still pass, unaffected (this fix touches only
+`agents/` and `prompts/`).
+
+**Manually verified against a real LIVE run** (temporarily
+`CAPTURE_MODE=live`/`MARKET_DATA_MODE=live` in `.env`, restored to
+`demo` afterward) — the exact scenario the bug was reported from: real
+Playwright TradingView capture (`SUCCESS`, 9s), a real Alpha Vantage
+quote (`1.15625593`, matching the same real EURUSD price range the
+original report showed), and a real Claude call that this time returned
+a complete, well-formed response with concise prose and all five
+categorical fields populated (`SIDEWAYS`/`WEAK`/`MIXED`/`UNCLEAR`/
+`ELEVATED`, `uncertainty=HIGH` — the agent correctly flagged that the
+test's demo-era trade parameters, entry/stop/target around 1.09-1.105,
+didn't correspond to the real current price near 1.156). The evaluator
+computed a real score (28/100, all four subjective components at or
+near their HIGH-uncertainty ceiling of 8, `risk_reward_score=20` exempt
+from the cap) and guardrails produced `REQUIRES_REVIEW` for real,
+legitimate reasons (`UNCERTAINTY_ACCEPTABLE` and `SCORE_THRESHOLD`
+failing; `SYNTHETIC_DATA` correctly *passing* since this run was
+genuinely LIVE-sourced, not `DEMO`). No truncation, no JSON error. Dev
+database and `.env` both reset afterward.
+
 ## Roadmap
 
 1. ~~Architecture~~

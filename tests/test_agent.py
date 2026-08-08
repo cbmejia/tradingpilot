@@ -53,13 +53,18 @@ def _successful_market_data(**overrides) -> MarketQuote:
     return MarketQuote(**defaults)
 
 
-def _fake_client(response_text: str = None, side_effect: Exception = None) -> MagicMock:
+def _fake_client(
+    response_text: str = None, side_effect: Exception = None, stop_reason: str = "end_turn"
+) -> MagicMock:
+    """stop_reason defaults to "end_turn" -- what a real, complete response
+    actually carries -- so every existing test that doesn't care about
+    truncation still reflects a realistic response shape."""
     client = MagicMock()
     if side_effect is not None:
         client.messages.create.side_effect = side_effect
     else:
         client.messages.create.return_value = SimpleNamespace(
-            content=[SimpleNamespace(type="text", text=response_text)]
+            content=[SimpleNamespace(type="text", text=response_text)], stop_reason=stop_reason
         )
     return client
 
@@ -278,6 +283,95 @@ def test_response_with_invalid_uncertainty_word_returns_failed():
     result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
 
     assert result.status == AgentAnalysisStatus.FAILED
+
+
+# ---------------------------------------------------------------------------
+# Truncated responses (stop_reason="max_tokens") are diagnosed as
+# truncation, not reported as a generic JSON parsing failure -- a real
+# LIVE run was cut off mid-string at ~1241 characters and the resulting
+# "response was not valid JSON" error sent debugging in the wrong
+# direction. See docs/iterations.md's "fix: agent response truncation on
+# live runs" entry.
+# ---------------------------------------------------------------------------
+
+
+def test_truncated_response_is_reported_as_truncation_not_a_parse_error():
+    # A real truncated response: valid JSON up to the point max_tokens cut
+    # it off mid-string, same shape as the actual failure this fix
+    # addresses.
+    truncated = '{\n  "analysis_text": "Price has been grinding higher against a ris'
+    client = _fake_client(truncated, stop_reason="max_tokens")
+
+    result = TradeAgent(client=client, max_tokens=2048).analyze(
+        _successful_capture(), _successful_market_data()
+    )
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert "truncated" in result.error_message.lower()
+    assert "max_tokens" in result.error_message
+    assert "2048" in result.error_message  # the actual configured limit, not a guess
+    assert "not valid json" not in result.error_message.lower()
+
+
+def test_truncated_response_never_attempts_to_parse_or_salvage_partial_json():
+    """Confirms this fix didn't add partial-JSON recovery -- a truncated
+    response is a FAILED analysis with every field None, same as any
+    other failure, never a partially-populated result."""
+    payload = json.loads(WELL_FORMED_RESPONSE)
+    # Well-formed JSON that nonetheless carries stop_reason="max_tokens"
+    # (e.g. the model finished exactly as the token budget ran out) --
+    # even then, truncation is reported as truncation, not silently
+    # treated as a clean success.
+    client = _fake_client(json.dumps(payload), stop_reason="max_tokens")
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert result.analysis_text is None
+    assert result.trend_direction is None
+    assert result.uncertainty is None
+
+
+def test_a_complete_response_with_end_turn_is_not_treated_as_truncated():
+    client = _fake_client(WELL_FORMED_RESPONSE, stop_reason="end_turn")
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.SUCCESS
+
+
+def test_missing_stop_reason_attribute_does_not_crash_or_misreport_truncation():
+    """Defensive: a response object that doesn't carry stop_reason at all
+    (not a real anthropic SDK shape, but this must not crash) is treated
+    as not-truncated and parsed normally."""
+    client = MagicMock()
+    client.messages.create.return_value = SimpleNamespace(
+        content=[SimpleNamespace(type="text", text=WELL_FORMED_RESPONSE)]
+    )
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.SUCCESS
+
+
+def test_max_tokens_defaults_to_2048_and_is_passed_to_the_api_call():
+    client = _fake_client(WELL_FORMED_RESPONSE)
+
+    TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    _, kwargs = client.messages.create.call_args
+    assert kwargs["max_tokens"] == 2048
+
+
+def test_max_tokens_is_configurable_and_actually_used():
+    client = _fake_client(WELL_FORMED_RESPONSE)
+
+    TradeAgent(client=client, max_tokens=4096).analyze(
+        _successful_capture(), _successful_market_data()
+    )
+
+    _, kwargs = client.messages.create.call_args
+    assert kwargs["max_tokens"] == 4096
 
 
 # ---------------------------------------------------------------------------

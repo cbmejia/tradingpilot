@@ -52,7 +52,18 @@ SYSTEM_PROMPT_PATH = PROMPTS_DIR / "system_prompt.md"
 ANALYSIS_PROMPT_PATH = PROMPTS_DIR / "analysis_prompt.md"
 
 DEFAULT_TIMEOUT_SECONDS = 60.0  # hard cap on the Claude API call -- no infinite wait
-DEFAULT_MAX_TOKENS = 1024
+
+# Sized for the actual response shape: four prose fields (each bounded to
+# a few sentences by prompts/analysis_prompt.md -- the categorical fields
+# are what's scored, not prose length, so there's no reason for these to
+# run long), five one-word categorical fields, uncertainty, and JSON
+# structure/field-name overhead. A typical well-formed response is
+# roughly 400-800 tokens; 2048 leaves a comfortable margin above that
+# without inviting runaway generation. Raised from 1024 after a real LIVE
+# run was truncated mid-string at ~1241 characters (stop_reason=
+# "max_tokens") -- see docs/iterations.md's "fix: agent response
+# truncation on live runs" entry for the diagnosis.
+DEFAULT_MAX_TOKENS = 2048
 
 TEXT_FIELDS = (
     "analysis_text",
@@ -257,11 +268,16 @@ class TradeAgent:
         self,
         model: Optional[str] = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
         client: Optional[object] = None,
     ):
         """
         model: Claude model id. Defaults to the CLAUDE_MODEL environment
         variable, then "claude-sonnet-5" if unset.
+
+        max_tokens: hard cap on the API response's output tokens. Stored
+        (not just passed inline to the API call) so a truncated response
+        can report the exact limit it hit.
 
         client: an object with a `.messages.create(...)` method matching
         anthropic.Anthropic's interface. Exists so tests can inject a
@@ -270,6 +286,7 @@ class TradeAgent:
         """
         self._model = model or os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
         self._timeout_seconds = timeout_seconds
+        self._max_tokens = max_tokens
         self._client = client
 
     def analyze(
@@ -322,7 +339,7 @@ class TradeAgent:
         try:
             response = client.messages.create(
                 model=self._model,
-                max_tokens=DEFAULT_MAX_TOKENS,
+                max_tokens=self._max_tokens,
                 system=system_prompt,
                 messages=[
                     {
@@ -352,6 +369,24 @@ class TradeAgent:
             return self._failed(f"Claude API request failed: {exc}")
 
         raw_text = _extract_text(response)
+
+        # Checked BEFORE attempting to parse, and reported as its own
+        # distinct failure -- a response cut off mid-write by the
+        # max_tokens limit is not the same problem as a genuinely
+        # malformed response, and treating the two identically ("response
+        # was not valid JSON") sends anyone debugging a real truncation
+        # looking at the wrong thing, exactly as it did for a real LIVE
+        # run before this check existed.
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            return self._failed(
+                f"Claude's response was truncated: generation stopped because it hit "
+                f"the max_tokens limit ({self._max_tokens}) before finishing "
+                f"(stop_reason='max_tokens'), not because of a parsing problem. The "
+                f"response was cut off after {len(raw_text)} characters. Raise "
+                f"max_tokens (agents/trade_agent.py's DEFAULT_MAX_TOKENS) if this "
+                f"keeps happening."
+            )
+
         try:
             parsed = _parse_response(raw_text)
         except ValueError as exc:
