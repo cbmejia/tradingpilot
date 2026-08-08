@@ -125,6 +125,37 @@ for bulk, repeated, or unattended automated capture. `DEMO` mode, backed
 by the committed fixture images in `screenshots/demo/`, is the supported
 path for demonstrations, grading, and any automated testing.
 
+## Market data tool design
+
+`tools/market_data.py` follows the identical pattern: one interface
+(`MarketDataProvider.get_quote(symbol) -> MarketQuote`), a `LIVE`
+provider and a `DEMO` provider, and a `MarketDataManager` that picks
+between them via `MARKET_DATA_MODE` and never falls back from one to the
+other. `MarketQuote` carries `price` and `timestamp` — and `timestamp` is
+always the time the *source* says the quote is from, never the time the
+tool happened to ask for it, because the data-freshness guardrail
+(Milestone 9) needs to know how old the data genuinely is.
+
+**The single rule this tool cannot break:** if the source is unreachable,
+times out, doesn't recognize the symbol, or sends back something that
+doesn't parse, the result is `FAILED` with `price=None`. Nothing here
+ever invents, estimates, interpolates, or carries forward a price — a
+fabricated number would corrupt the agent, the evaluation, and the
+guardrails simultaneously, while still looking legitimate.
+
+- **LIVE mode** — `LiveMarketDataProvider`: calls Alpha Vantage's
+  `CURRENCY_EXCHANGE_RATE` endpoint. Free tier, no paid plan, but does
+  require a free signup for an API key (`MARKET_DATA_API_KEY` in `.env`).
+  Chosen over no-signup alternatives (e.g. Frankfurter) because it
+  reports an actual quote timestamp rather than a once-daily reference
+  rate — this project needs to know how old a quote is, not just what it
+  was as of some unspecified point today.
+- **DEMO mode** — `DemoMarketDataProvider`: reads fixed quotes from
+  `tools/demo_market_data.json`, each with its own fixed (non-"now")
+  timestamp, marked with `source="demo_fixture"`. No network access. An
+  unrecognized symbol fails clearly rather than substituting another
+  pair's price.
+
 ## Data flow (per run)
 
 ```

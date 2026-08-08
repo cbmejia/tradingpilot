@@ -21,7 +21,7 @@ what's next.
 - `backend/` — FastAPI app: routes, orchestrator, request/response schemas
 - `agents/` — the trading agent (wraps the Claude call) and its prompt logic
 - `capture/` — chart capture tool: `CaptureProvider` interface, `DemoProvider` (offline fixtures), `LiveProvider` (Playwright), `CaptureManager` (picks one, never falls back)
-- `tools/` — market data, economic calendar (chart capture lives in `capture/` — see above)
+- `tools/` — `market_data.py` (`MarketDataProvider`/`DemoMarketDataProvider`/`LiveMarketDataProvider`/`MarketDataManager`, same pattern as `capture/`) and economic calendar (chart capture lives in `capture/` — see above)
 - `evals/` — deterministic rubric scoring of the agent's analysis
 - `guardrails/` — hard safety rules (RR, freshness, validity, confidence) the agent may never bypass
 - `database/` — SQLAlchemy models and persistence for the full audit trail
@@ -72,7 +72,28 @@ service before using LIVE mode: it's meant for your own manual,
 low-volume use, not automated bulk capture — see
 [docs/architecture.md](docs/architecture.md).
 
+## Trying the market data tool by hand
+
+DEMO mode needs nothing beyond the steps above and never touches the
+network:
+
+```bash
+python -c "from tools.market_data import get_market_data; r = get_market_data('EURUSD', mode='demo'); print(r)"
+```
+
+LIVE mode needs a free Alpha Vantage API key (free signup required, no
+paid plan): get one at https://www.alphavantage.co/support/#api-key, put
+it in `.env` as `MARKET_DATA_API_KEY=your-key-here`, then:
+
+```bash
+python -c "from tools.market_data import get_market_data; r = get_market_data('EURUSD', mode='live'); print(r)"
+```
+
+Without a key set, this fails cleanly (status `FAILED`, `price=None`,
+and a message telling you where to get one) rather than making a request
+at all.
+
 ## Status
 
-Milestone 5 of 12: chart capture tool (LIVE and DEMO providers). See
+Milestone 6 of 12: market data tool (LIVE and DEMO providers). See
 [docs/iterations.md](docs/iterations.md).

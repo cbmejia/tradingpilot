@@ -253,6 +253,67 @@ all, including a blank page, a cookie/consent banner, or a broken render
   stand-in) still passes. All four mock Playwright's browser/page objects
   directly — no real browser, no network.
 
+## Milestone 6 — Market data tool (LIVE and DEMO providers)
+
+Built `get_market_data()` in `tools/market_data.py`, structured like
+`capture/`: one interface (`MarketDataProvider`), a `LiveMarketDataProvider`
+and a `DemoMarketDataProvider`, and a `MarketDataManager` that picks one
+based on `MARKET_DATA_MODE` and never falls back between them. Kept as a
+single file (per the instruction), not a package like `capture/` — small
+enough not to need splitting up.
+
+**The rule that mattered most:** if the source fails, times out, doesn't
+know the symbol, or sends back something unparseable, the result is
+`FAILED` with `price=None` — never an invented, estimated, or
+carried-forward number. Every failure path in `LiveMarketDataProvider`
+returns `price=None`; there is no line of code anywhere in this file that
+assigns a price from anywhere other than a successfully parsed API
+response.
+
+- **API chosen: Alpha Vantage**, `CURRENCY_EXCHANGE_RATE` endpoint. Free
+  tier, no paid plan needed — but it does need a free signup for an API
+  key (`https://www.alphavantage.co/support/#api-key`). Picked over a
+  no-signup option (Frankfurter) specifically because it reports a real
+  quote timestamp, not a once-a-day reference rate — the point of
+  recording a timestamp at all is knowing how old the data is.
+- `tools/market_data.py` — `MarketQuote` (`mode`, `symbol`, `price`,
+  `timestamp`, `source`, `status`, `error_message`); `timestamp` is
+  always the source's own reported quote time, parsed from Alpha
+  Vantage's `"6. Last Refreshed"` + `"7. Time Zone"` fields (rejected if
+  the source ever reports a non-UTC zone, rather than guessing an
+  offset) — never `datetime.now()`. Hard 10-second timeout on the HTTP
+  request.
+- `tools/demo_market_data.json` — fixed sample quotes for `EURUSD` and
+  `GBPUSD`, each with its own fixed (not "now") timestamp, so DEMO mode's
+  "source time" behaves the same way LIVE's does: a real recorded time,
+  not a fetch time. `source="demo_fixture"` marks these clearly as
+  sample data. An unrecognized symbol fails cleanly, never substituting
+  another pair's price.
+- `.env.example` — `MARKET_DATA_API_KEY` now documented as the (free,
+  signup-required) Alpha Vantage key; `MARKET_DATA_BASE_URL` wired up as
+  an optional override (defaults to Alpha Vantage's URL if unset).
+- `requests` added to `backend/requirements.txt` (LIVE mode only; DEMO
+  mode needs no extra installs, same pattern as `capture/`).
+- `tests/test_market_data.py` — 18 tests, none touching the network: demo
+  success/determinism/unknown-symbol-failure/timezone-aware timestamp,
+  manager mode handling and the never-falls-back-to-demo guarantee, and
+  for `LiveMarketDataProvider` (all via mocking `requests.get` directly):
+  missing API key (fails before any request is even attempted), timeout,
+  malformed response body, a non-numeric exchange rate, an
+  unknown-symbol error response, a non-UTC source timezone, an invalid
+  symbol shape, and — the key test — a fixed historical
+  `"6. Last Refreshed"` value that proves the returned timestamp is the
+  source's time, not `datetime.now()` at fetch time.
+
+Manually verified from the terminal: a demo fetch returns the fixed
+EURUSD sample quote; a live fetch (no `MARKET_DATA_API_KEY` set) fails
+cleanly with a message telling you where to get one, `price=None`, and no
+network call made.
+
+Not wired into the orchestrator, the agent, or the frontend, and no
+market-data API endpoint was added. All 65 tests pass (19 database + 11
+API + 17 capture + 18 market data).
+
 ## Rebuilding the database
 
 `init_db()` only ever adds tables that don't exist yet — it never alters
@@ -280,7 +341,7 @@ isn't forgotten.
 3. ~~Database schema~~
 4. ~~Backend API~~
 5. ~~Screenshot tool~~
-6. Market-data tool
+6. ~~Market-data tool~~
 7. Agent loop
 8. Evaluation
 9. Guardrails
