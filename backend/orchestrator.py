@@ -32,18 +32,25 @@
 # a second human decision on the same run -- pipeline results, once
 # recorded, are final.
 #
-# A known, deliberate limitation this file works around rather than
-# fixes: the `agent_analyses` and `evaluations` database tables (Milestone
-# 3) have no status/error_message columns, and their score columns are
-# NOT NULL -- so a FAILED agent analysis or a FAILED evaluation cannot be
-# stored as a structured row under the current schema. This orchestrator
-# does not change that schema (out of scope for this milestone). Instead,
-# a failed agent analysis or evaluation is fully described in the
-# audit_events trail (including, for a successful analysis, the five
-# categorical fields the evaluator actually scored from, since those
-# aren't columns on agent_analyses either) -- so GET /runs/{id} still
-# tells the whole story, just via audit_events rather than a dedicated
-# row for the failure. See docs/iterations.md's Milestone 10.5 entry.
+# Milestone 10.5 fix: agent_analyses and evaluations now carry
+# status/error_message, matching the shape captures and market_data
+# already had -- so a FAILED agent analysis or a FAILED evaluation is
+# stored as a real row (crud.add_failed_agent_analysis /
+# add_failed_evaluation), not just described in audit_events. Exactly one
+# row is written to each table for every analyzed run, whether the stage
+# succeeded, failed, or was never attempted because an upstream stage
+# failed first -- so GET /runs/{id} can always show success or failure by
+# reading the record itself. The audit trail still gets an event either
+# way, for the same reason it always has: a structured row says "what,"
+# the audit trail says "when, in what order, alongside what else."
+#
+# Still a known, open gap, NOT addressed by this fix (out of its scope):
+# agent_analyses has no columns for the five categorical fields the agent
+# produces (trend_direction, trend_quality, structure_quality,
+# setup_quality, context_risk) -- a gap from the Milestone 8 revision.
+# A successful analysis's audit-event text remains the only place those
+# five values are visible after the fact. See docs/iterations.md's
+# Milestone 10.5 fix entry.
 
 from __future__ import annotations
 
@@ -235,6 +242,11 @@ def run_pipeline(session: Session, run_id: str) -> Run:
     )
 
     # --- Steps 6-7: agent analysis -- only if BOTH inputs are usable ---
+    # Either way, exactly one AgentAnalysis row is written -- SUCCESS,
+    # FAILED (Claude was called and rejected/errored), or FAILED (never
+    # called at all because an upstream stage failed first). Milestone
+    # 10.5 fix: this is what lets GET /runs/{id} show success or failure
+    # on the record itself, not only in audit_events.
     if capture_result.status == CaptureStatus.SUCCESS and market_data_result.status == MarketDataStatus.SUCCESS:
         crud.add_audit_event(
             session, run_id=run_id, event_type="agent_analysis_started", event_message="Agent analysis started."
@@ -250,6 +262,10 @@ def run_pipeline(session: Session, run_id: str) -> Run:
                 setup_assessment=agent_result.setup_assessment,
                 uncertainty=agent_result.uncertainty,
             )
+        else:
+            crud.add_failed_agent_analysis(
+                session, run_id=run_id, error_message=agent_result.error_message
+            )
         crud.add_audit_event(
             session,
             run_id=run_id,
@@ -260,6 +276,9 @@ def run_pipeline(session: Session, run_id: str) -> Run:
         agent_result = _skipped_agent_result(
             "Agent analysis skipped -- capture and market data must both succeed "
             "before the agent is called."
+        )
+        crud.add_failed_agent_analysis(
+            session, run_id=run_id, error_message=agent_result.error_message
         )
         crud.add_audit_event(
             session,
@@ -272,6 +291,7 @@ def run_pipeline(session: Session, run_id: str) -> Run:
         )
 
     # --- Step 8: evaluation -- only if the agent succeeded ---
+    # Same shape as above: exactly one Evaluation row is always written.
     if agent_result.status == AgentAnalysisStatus.SUCCESS:
         crud.add_audit_event(
             session, run_id=run_id, event_type="evaluation_started", event_message="Evaluation started."
@@ -287,6 +307,10 @@ def run_pipeline(session: Session, run_id: str) -> Run:
                 risk_reward_score=evaluation_result.risk_reward_score,
                 timing_context_score=evaluation_result.timing_context_score,
             )
+        else:
+            crud.add_failed_evaluation(
+                session, run_id=run_id, error_message=evaluation_result.error_message
+            )
         crud.add_audit_event(
             session,
             run_id=run_id,
@@ -296,6 +320,9 @@ def run_pipeline(session: Session, run_id: str) -> Run:
     else:
         evaluation_result = _skipped_evaluation_result(
             "Evaluation skipped -- there is no successful agent analysis to score."
+        )
+        crud.add_failed_evaluation(
+            session, run_id=run_id, error_message=evaluation_result.error_message
         )
         crud.add_audit_event(
             session,

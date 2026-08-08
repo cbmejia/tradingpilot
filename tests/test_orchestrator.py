@@ -193,10 +193,14 @@ def test_every_stage_result_is_persisted_and_readable_via_get_run(client):
     assert full_run["market_data"][0]["source"] == "demo_fixture"
 
     assert len(full_run["analyses"]) == 1
+    assert full_run["analyses"][0]["status"] == "SUCCESS"
+    assert full_run["analyses"][0]["error_message"] is None
     assert full_run["analyses"][0]["uncertainty"] == "MEDIUM"
     assert full_run["analyses"][0]["analysis_text"]
 
     assert len(full_run["evaluations"]) == 1
+    assert full_run["evaluations"][0]["status"] == "SUCCESS"
+    assert full_run["evaluations"][0]["error_message"] is None
     # MEDIUM uncertainty caps each subjective component at 14; RR = 2.0
     # (entry 1.0950/stop 1.0900/target 1.1050) scores the full 20 --
     # matches docs/rubric.md's worked example: 76 total.
@@ -228,8 +232,20 @@ def test_failed_capture_stops_pipeline_does_not_call_agent_but_guardrails_still_
 
     assert body["captures"][0]["status"] == "FAILED"
     assert body["captures"][0]["error_message"] == "Chart element never appeared."
-    assert body["analyses"] == []
-    assert body["evaluations"] == []
+
+    # Milestone 10.5 fix: even though the agent was never called, a
+    # FAILED AgentAnalysis/Evaluation row is still stored -- one row each,
+    # never zero rows -- so the failure is visible on the record itself.
+    assert len(body["analyses"]) == 1
+    assert body["analyses"][0]["status"] == "FAILED"
+    assert body["analyses"][0]["error_message"] is not None
+    assert body["analyses"][0]["analysis_text"] is None
+    assert body["analyses"][0]["uncertainty"] is None
+
+    assert len(body["evaluations"]) == 1
+    assert body["evaluations"][0]["status"] == "FAILED"
+    assert body["evaluations"][0]["error_message"] is not None
+    assert body["evaluations"][0]["total_score"] is None
 
     assert len(body["guardrail_results"]) == len(ALL_GUARDRAIL_NAMES)
     capture_check = next(g for g in body["guardrail_results"] if g["guardrail_name"] == "CAPTURE_SUCCEEDED")
@@ -260,8 +276,12 @@ def test_failed_market_data_stops_pipeline_does_not_call_agent_but_guardrails_st
 
     assert body["market_data"][0]["status"] == "FAILED"
     assert body["market_data"][0]["error_message"] == "No demo quote for EURUSD."
-    assert body["analyses"] == []
-    assert body["evaluations"] == []
+
+    assert len(body["analyses"]) == 1
+    assert body["analyses"][0]["status"] == "FAILED"
+
+    assert len(body["evaluations"]) == 1
+    assert body["evaluations"][0]["status"] == "FAILED"
 
     assert len(body["guardrail_results"]) == len(ALL_GUARDRAIL_NAMES)
     market_check = next(
@@ -277,7 +297,12 @@ def test_failed_market_data_stops_pipeline_does_not_call_agent_but_guardrails_st
 # ---------------------------------------------------------------------------
 
 
-def test_failed_agent_analysis_is_recorded_and_not_evaluated(client):
+def test_failed_agent_analysis_is_recorded_as_a_row_and_not_evaluated(client):
+    """Milestone 10.5 fix: a failed agent analysis is now stored as a real
+    AgentAnalysis row -- status FAILED, the real error message, and every
+    qualitative field null (never a fabricated placeholder). evaluate()
+    is still never called (nothing to score), and the resulting
+    Evaluation row is itself a FAILED row too, not an empty list."""
     created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
 
     with _patched_agent(_failed_agent_result("Claude's response could not be used: malformed JSON")):
@@ -286,15 +311,34 @@ def test_failed_agent_analysis_is_recorded_and_not_evaluated(client):
     assert response.status_code == 200
     body = response.json()
 
-    # Capture and market data both succeeded (real DEMO providers), but
-    # there is no structured analysis row -- the agent_analyses table has
-    # no way to store a failure (see backend/orchestrator.py's module
-    # docstring) -- the failure is recorded in the audit trail instead.
     assert body["captures"][0]["status"] == "SUCCESS"
     assert body["market_data"][0]["status"] == "SUCCESS"
-    assert body["analyses"] == []
-    assert body["evaluations"] == []
 
+    # The failure is on the record itself -- GET /runs/{id} doesn't
+    # require parsing audit_events to know this analysis failed.
+    assert len(body["analyses"]) == 1
+    analysis = body["analyses"][0]
+    assert analysis["status"] == "FAILED"
+    assert analysis["error_message"] == "Claude's response could not be used: malformed JSON"
+    assert analysis["analysis_text"] is None
+    assert analysis["trend_assessment"] is None
+    assert analysis["structure_assessment"] is None
+    assert analysis["setup_assessment"] is None
+    assert analysis["uncertainty"] is None
+
+    # Not evaluated -- but still recorded as a FAILED row, not an absence.
+    assert len(body["evaluations"]) == 1
+    evaluation = body["evaluations"][0]
+    assert evaluation["status"] == "FAILED"
+    assert evaluation["error_message"] is not None
+    assert evaluation["trend_score"] is None
+    assert evaluation["structure_score"] is None
+    assert evaluation["entry_score"] is None
+    assert evaluation["risk_reward_score"] is None
+    assert evaluation["timing_context_score"] is None
+    assert evaluation["total_score"] is None
+
+    # The audit trail still describes it too -- both are kept.
     audit_messages = " ".join(e["event_message"] for e in body["audit_events"])
     assert "malformed JSON" in audit_messages
 

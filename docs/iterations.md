@@ -945,6 +945,160 @@ deliberately paused so this could be its own milestone first. All 183
 tests pass (19 database + 25 API + 17 capture + 19 market data + 25 agent
 + 32 evaluation + 36 guardrails + 10 orchestrator).
 
+## Milestone 10.5 fix — failure states on analysis and evaluation records
+
+Closed the schema gap flagged (but deliberately not fixed, as out of
+scope) in the Milestone 10.5 entry above: `agent_analyses` and
+`evaluations` had `NOT NULL` score/text columns and no `status`/
+`error_message` columns, so a failed agent analysis or a failed
+evaluation could not be stored as a row -- only described in
+`audit_events`. That broke the pattern `captures` and `market_data`
+already followed (both have carried `status`+`error_message` since
+Milestone 3), and meant a client reading `GET /runs/{id}` had to parse
+free-text audit events to know whether an analysis or evaluation had
+succeeded. Fixed before any UI gets built on top of that shape, per the
+request.
+
+**Schema (`database/models.py`):**
+
+- `agent_analyses` gained `status` (`"SUCCESS"` | `"FAILED"`) and
+  `error_message` (nullable `Text`), matching `captures`/`market_data`
+  exactly. `analysis_text`, `trend_assessment`, `structure_assessment`,
+  `setup_assessment`, and `uncertainty` all became nullable -- `NULL` on
+  a `FAILED` row, never a fabricated placeholder string. No `CHECK`
+  constraint was added here, matching `captures`/`market_data`, neither
+  of which has one either -- see below for why `evaluations` is
+  different.
+- `evaluations` gained the same `status`/`error_message` columns, and all
+  six score columns (`trend_score`, `structure_score`, `entry_score`,
+  `risk_reward_score`, `timing_context_score`, `total_score`) became
+  nullable. **Not zero** on a `FAILED` row -- zero is a real, meaningful
+  score (RR < 1.0 genuinely scores 0, `UNCLEAR` genuinely scores 0), and
+  storing it for a run that was never actually scored would be
+  indistinguishable from a genuine all-zero result. This was the one
+  design point worth being careful about: a score column that's merely
+  "optional" but defaults to 0 would have silently reintroduced exactly
+  the ambiguity this fix exists to remove.
+
+**The `CHECK` constraint, adapted rather than dropped:** the original
+Milestone 3 constraint (`total_score = trend_score + ... +
+timing_context_score`) was replaced with:
+
+```sql
+(
+  status = 'FAILED'
+  AND trend_score IS NULL AND structure_score IS NULL
+  AND entry_score IS NULL AND risk_reward_score IS NULL
+  AND timing_context_score IS NULL AND total_score IS NULL
+) OR (
+  status = 'SUCCESS'
+  AND trend_score IS NOT NULL AND structure_score IS NOT NULL
+  AND entry_score IS NOT NULL AND risk_reward_score IS NOT NULL
+  AND timing_context_score IS NOT NULL AND total_score IS NOT NULL
+  AND total_score = trend_score + structure_score + entry_score
+      + risk_reward_score + timing_context_score
+)
+```
+
+Two branches, keyed off `status`, so there is no third possibility a row
+can be in: a `SUCCESS` row must have all six scores non-null *and* the
+original sum rule must hold exactly as it always did; a `FAILED` row
+must have all six null. A row that's half-and-half -- a `SUCCESS` row
+missing a score, or a `FAILED` row carrying a stray real score on one
+component -- fails the constraint either way, however it was
+constructed, same backstop guarantee the original constraint gave for
+its one case. (A side effect worth naming: because both branches require
+an exact `status` match, an unrecognized third `status` value, e.g.
+`'PENDING'`, fails the constraint too -- the same `CHECK` now also
+enforces that `status` can only ever be `'SUCCESS'` or `'FAILED'` on
+this table, which the original didn't need to care about.) The
+constraint keeps its original name,
+`ck_evaluations_total_score_is_sum_of_components`, since it's still
+fundamentally the same rule, just written to hold for one more case than
+before. Proven directly by four tests in `tests/test_database.py`:
+a `SUCCESS` row with a mismatched total is still rejected; a `FAILED`
+row with all-null scores is now permitted; a `FAILED` row with one
+stray non-null score is rejected; and (unchanged, still passing without
+modification) the original Milestone 3 test that omits `status`
+entirely still raises `IntegrityError`, just now via the `NOT NULL`
+constraint on `status` rather than the sum rule specifically -- both are
+real integrity violations, so the test's assertion holds either way.
+
+**`database/crud.py`:** `add_agent_analysis()` and `add_evaluation()`
+are unchanged in signature -- still exactly the parameters they always
+had, still no `total_score` parameter, still guaranteed `SUCCESS` rows
+only (each now hardcodes `status="SUCCESS"` internally, not as a
+parameter, so neither function can be used to smuggle in a failure with
+fabricated qualitative fields). Two new functions handle the other case:
+`add_failed_agent_analysis(session, *, run_id, error_message)` and
+`add_failed_evaluation(session, *, run_id, error_message)`, each writing
+a `status="FAILED"` row with every other field `None` except
+`error_message`. Keeping the original functions' signatures untouched
+meant every pre-existing caller and test needed zero changes.
+
+**`backend/orchestrator.py`:** now writes exactly one `AgentAnalysis` row
+and exactly one `Evaluation` row for every analyzed run, in every case --
+success, an attempted-and-failed stage, or a stage that was never
+attempted because an upstream one failed first (previously, the last two
+cases left the table empty and relied on `audit_events` alone). The
+audit trail still gets its own event either way -- both are kept
+deliberately: the row says *what* happened, the audit trail says *when*,
+*in what order*, and *alongside what else*.
+
+**`backend/schemas.py`:** `AgentAnalysisOut` and `EvaluationOut` both
+gained `status: str` and `error_message: Optional[str]`, and every field
+that can now be `None` on a `FAILED` row was changed to `Optional` --
+so `GET /runs/{run_id}` exposes success or failure directly on each
+record, which was the actual point of this fix.
+
+**Still open, not addressed by this fix (unchanged from the Milestone
+10.5 entry):** `agent_analyses` still has no columns for the five
+categorical fields the agent produces (`trend_direction`, `trend_quality`,
+`structure_quality`, `setup_quality`, `context_risk`) -- a gap from the
+Milestone 8 revision, not this fix. A successful analysis's audit-event
+text remains the only place those five values are visible after the
+fact.
+
+**Database rebuilt, not migrated**, per the instruction -- there was no
+real audit data to preserve. `database/tradepilot.db` was deleted and
+recreated with `python -m database.init_db`; the commands in "Rebuilding
+the database" below are unchanged (this fix is exactly the kind of
+"a model changes shape" case that section already describes).
+
+- `tests/test_database.py` — 5 tests added (24 total, up from 19):
+  a failed agent analysis stored via `crud.add_failed_agent_analysis()`
+  with status/error/null fields; a failed evaluation stored via
+  `crud.add_failed_evaluation()` with status/error/null scores (not
+  zeros); the two direct-CHECK-constraint tests described above (`SUCCESS`
+  row rejected on mismatch, `FAILED` row permitted with all-null scores);
+  and the partial-null rejection test. `test_save_agent_analysis` and
+  `test_save_evaluation_computes_total_score` (both pre-existing) gained
+  one extra assertion each (`status == "SUCCESS"`, `error_message is
+  None`) rather than being rewritten.
+- `tests/test_orchestrator.py` — 3 of the existing 10 tests had their
+  assertions updated to match the new behavior (a failed/skipped stage
+  now produces a stored `FAILED` row, not an empty list) -- no tests were
+  removed or added; the same 10 scenarios are still covered, now checking
+  the record directly instead of asserting its absence. `test_success`
+  path tests gained `status`/`error_message` assertions too.
+
+Manually verified against a real running server: deleted and recreated
+`database/tradepilot.db`, started the server with `ANTHROPIC_API_KEY`
+cleared for that process only (not edited in `.env`) so the agent fails
+its own internal validation check -- "ANTHROPIC_API_KEY is not set" --
+before it ever imports the `anthropic` client or makes a network call.
+Created a run and analyzed it: `GET /runs/{id}` showed `analyses[0]` with
+`status: "FAILED"`, the real error message, and every qualitative field
+`null`; `evaluations[0]` with `status: "FAILED"`, `error_message:
+"Evaluation skipped -- there is no successful agent analysis to score."`,
+and every score field `null` (not zero) -- both visible directly on the
+record, exactly as required, with the audit trail still describing the
+same thing in its own words alongside it. Dev database reset to empty
+afterward.
+
+All 188 tests pass (24 database + 25 API + 17 capture + 19 market data +
+25 agent + 32 evaluation + 36 guardrails + 10 orchestrator).
+
 ## Rebuilding the database
 
 `init_db()` only ever adds tables that don't exist yet — it never alters

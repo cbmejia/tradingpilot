@@ -118,22 +118,34 @@ class MarketData(Base):
 
 class AgentAnalysis(Base):
     """
-    The agent's qualitative read of the chart and market data.
+    The agent's qualitative read of the chart and market data -- success
+    or failure alike (Milestone 10.5 fix).
 
     Deliberately no numeric fields here — trend/structure/setup/uncertainty
     are all text. Turning qualitative analysis into a number is the
     Evaluation table's job, not the agent's.
+
+    status/error_message follow the exact same success-or-failure shape
+    Capture and MarketData already use. On FAILED, every qualitative
+    field below is left null and error_message carries the real reason --
+    never a fabricated placeholder analysis. This table intentionally has
+    no CHECK constraint tying status to nullability (matching Capture and
+    MarketData, neither of which has one either); Evaluation is the one
+    table that needs one, because it alone already had to enforce
+    total_score = sum of components.
     """
 
     __tablename__ = "agent_analyses"
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
-    analysis_text: Mapped[str] = mapped_column(Text)
-    trend_assessment: Mapped[str] = mapped_column(String(200))
-    structure_assessment: Mapped[str] = mapped_column(String(200))
-    setup_assessment: Mapped[str] = mapped_column(String(200))
-    uncertainty: Mapped[str] = mapped_column(String(200))
+    status: Mapped[str] = mapped_column(String(10))  # "SUCCESS" | "FAILED"
+    analysis_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    trend_assessment: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    structure_assessment: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    setup_assessment: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    uncertainty: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
 
     run: Mapped["Run"] = relationship(back_populates="analyses")
@@ -141,35 +153,63 @@ class AgentAnalysis(Base):
 
 class Evaluation(Base):
     """
-    The deterministic rubric score for a run.
+    The deterministic rubric score for a run -- success or failure alike
+    (Milestone 10.5 fix).
 
     IMPORTANT: total_score is meant to always be computed by
     crud.add_evaluation() as the sum of the five component scores below.
     That's enforced at the Python level, but Python-level discipline alone
     can be bypassed by constructing Evaluation(...) directly with whatever
     total_score you like — so the CHECK constraint below enforces the same
-    rule at the database level. SQLite will refuse to commit any row,
-    however it was created, where total_score doesn't equal the sum of the
-    five components.
+    rule at the database level, for a SUCCESS row.
+
+    A FAILED row (the agent analysis failed, or the risk/reward numbers
+    were incoherent) stores no scores at all -- every score column,
+    including total_score, is NULL. Never zero: zero is a real, meaningful
+    score, and storing it for a run that was never actually scored would
+    be indistinguishable from a genuine all-zero evaluation.
+
+    The CHECK constraint below enforces both halves of that split at once,
+    keyed off status, so there is no third possibility a row could be in:
+    - status='SUCCESS' requires all six score columns to be non-null AND
+      total_score to exactly equal the sum of the other five (the
+      original Milestone 3 rule, unchanged for this case).
+    - status='FAILED' requires all six score columns to be null.
+    Any other combination (a SUCCESS row with a null score, a FAILED row
+    with a non-null score, an unrecognized status value entirely) fails
+    the constraint and the row is refused, however it was constructed.
     """
 
     __tablename__ = "evaluations"
     __table_args__ = (
         CheckConstraint(
-            "total_score = trend_score + structure_score + entry_score "
-            "+ risk_reward_score + timing_context_score",
+            "("
+            "status = 'FAILED' "
+            "AND trend_score IS NULL AND structure_score IS NULL "
+            "AND entry_score IS NULL AND risk_reward_score IS NULL "
+            "AND timing_context_score IS NULL AND total_score IS NULL"
+            ") OR ("
+            "status = 'SUCCESS' "
+            "AND trend_score IS NOT NULL AND structure_score IS NOT NULL "
+            "AND entry_score IS NOT NULL AND risk_reward_score IS NOT NULL "
+            "AND timing_context_score IS NOT NULL AND total_score IS NOT NULL "
+            "AND total_score = trend_score + structure_score + entry_score "
+            "+ risk_reward_score + timing_context_score"
+            ")",
             name="ck_evaluations_total_score_is_sum_of_components",
         ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
-    trend_score: Mapped[int] = mapped_column()
-    structure_score: Mapped[int] = mapped_column()
-    entry_score: Mapped[int] = mapped_column()
-    risk_reward_score: Mapped[int] = mapped_column()
-    timing_context_score: Mapped[int] = mapped_column()
-    total_score: Mapped[int] = mapped_column()
+    status: Mapped[str] = mapped_column(String(10))  # "SUCCESS" | "FAILED"
+    trend_score: Mapped[int | None] = mapped_column(nullable=True)
+    structure_score: Mapped[int | None] = mapped_column(nullable=True)
+    entry_score: Mapped[int | None] = mapped_column(nullable=True)
+    risk_reward_score: Mapped[int | None] = mapped_column(nullable=True)
+    timing_context_score: Mapped[int | None] = mapped_column(nullable=True)
+    total_score: Mapped[int | None] = mapped_column(nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
 
     run: Mapped["Run"] = relationship(back_populates="evaluations")

@@ -219,9 +219,13 @@ response already reflects the finished run.
    in `.env`, this makes one real Claude call; if it's unset, the agent
    stage fails cleanly (see "Trying the agent by hand" above) and the run
    still completes, `BLOCKED` at `ANALYSIS_SUCCEEDED`, with the real
-   reason recorded. Either way you'll get `200` back with the finished
-   run: captures, market data, analysis, evaluation, all eleven guardrail
-   results, and `guardrail_outcome`.
+   reason recorded directly on the `analyses[0]` record (`status:
+   "FAILED"`, `error_message: "..."`, every qualitative field `null`) —
+   not only in the audit trail. `evaluations[0]` shows the same shape
+   (`status: "FAILED"`, every score field `null`, never zero). Either way
+   you'll get `200` back with the finished run: captures, market data,
+   analysis, evaluation, all eleven guardrail results, and
+   `guardrail_outcome`.
 3. Expand **`GET /runs/{run_id}`** → **Try it out** → same `run_id` →
    **Execute** to see the same thing again, plus the full `audit_events`
    trail in order (`analysis_started`, `capture_started`/
@@ -243,5 +247,8 @@ response already reflects the finished run.
 
 ## Status
 
-Milestone 10.5 of 12: orchestrator wires the 12-step pipeline. See
+Milestone 10.5 of 12: orchestrator wires the 12-step pipeline, plus a
+follow-up fix so a failed agent analysis or evaluation is stored as a
+proper row (`status`/`error_message`, matching `captures`/`market_data`)
+instead of only being described in the audit trail. See
 [docs/iterations.md](docs/iterations.md).

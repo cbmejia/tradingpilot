@@ -83,27 +83,45 @@ class MarketDataOut(BaseModel):
 
 
 class AgentAnalysisOut(BaseModel):
+    """
+    Milestone 10.5 fix: status/error_message expose success or failure
+    directly on the record -- a client no longer has to infer it from the
+    audit trail. The qualitative fields are Optional because a FAILED row
+    has every one of them set to null, never a fabricated placeholder.
+    """
+
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    analysis_text: str
-    trend_assessment: str
-    structure_assessment: str
-    setup_assessment: str
-    uncertainty: str
+    status: str
+    analysis_text: Optional[str]
+    trend_assessment: Optional[str]
+    structure_assessment: Optional[str]
+    setup_assessment: Optional[str]
+    uncertainty: Optional[str]
+    error_message: Optional[str]
     timestamp: datetime
 
 
 class EvaluationOut(BaseModel):
+    """
+    Milestone 10.5 fix: status/error_message expose success or failure
+    directly on the record. The score fields are Optional because a
+    FAILED row has every one of them, including total_score, set to
+    null -- never zero, which is itself a real, meaningful score.
+    """
+
     model_config = ConfigDict(from_attributes=True)
 
     id: int
-    trend_score: int
-    structure_score: int
-    entry_score: int
-    risk_reward_score: int
-    timing_context_score: int
-    total_score: int
+    status: str
+    trend_score: Optional[int]
+    structure_score: Optional[int]
+    entry_score: Optional[int]
+    risk_reward_score: Optional[int]
+    timing_context_score: Optional[int]
+    total_score: Optional[int]
+    error_message: Optional[str]
     timestamp: datetime
 
 

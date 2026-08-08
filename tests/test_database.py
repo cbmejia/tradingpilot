@@ -229,6 +229,30 @@ def test_save_agent_analysis(session):
 
     assert analysis.run_id == run.id
     assert analysis.trend_assessment == "uptrend"
+    assert analysis.status == "SUCCESS"
+    assert analysis.error_message is None
+
+
+def test_save_failed_agent_analysis_stores_status_and_error_with_null_fields(session):
+    """Milestone 10.5 fix: a failed analysis is a real row, not just an
+    audit_events entry -- status FAILED, the real reason, and every
+    qualitative field null (never a fabricated placeholder)."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    analysis = crud.add_failed_agent_analysis(
+        session,
+        run_id=run.id,
+        error_message="Claude's response could not be used: malformed JSON",
+    )
+
+    assert analysis.run_id == run.id
+    assert analysis.status == "FAILED"
+    assert analysis.error_message == "Claude's response could not be used: malformed JSON"
+    assert analysis.analysis_text is None
+    assert analysis.trend_assessment is None
+    assert analysis.structure_assessment is None
+    assert analysis.setup_assessment is None
+    assert analysis.uncertainty is None
 
 
 def test_save_evaluation_computes_total_score(session):
@@ -245,6 +269,35 @@ def test_save_evaluation_computes_total_score(session):
     )
 
     assert evaluation.total_score == 18 + 15 + 12 + 20 + 10
+    assert evaluation.status == "SUCCESS"
+    assert evaluation.error_message is None
+
+
+def test_save_failed_evaluation_stores_status_and_error_with_null_scores_not_zeros(session):
+    """Milestone 10.5 fix: a failed evaluation is a real row, not just an
+    audit_events entry -- status FAILED, the real reason, and every score
+    column NULL. Specifically not zero: zero is a real, meaningful score,
+    and storing it here would be indistinguishable from a genuine
+    all-zero evaluation."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    evaluation = crud.add_failed_evaluation(
+        session,
+        run_id=run.id,
+        error_message="Cannot compute risk/reward: missing trade parameter(s): entry, stop, target",
+    )
+
+    assert evaluation.run_id == run.id
+    assert evaluation.status == "FAILED"
+    assert evaluation.error_message == (
+        "Cannot compute risk/reward: missing trade parameter(s): entry, stop, target"
+    )
+    assert evaluation.trend_score is None
+    assert evaluation.structure_score is None
+    assert evaluation.entry_score is None
+    assert evaluation.risk_reward_score is None
+    assert evaluation.timing_context_score is None
+    assert evaluation.total_score is None
 
 
 def test_add_evaluation_has_no_total_score_parameter():
@@ -310,6 +363,84 @@ def test_evaluation_check_constraint_rejects_mismatched_total_score(session):
         total_score=9999,
     )
     session.add(bad_evaluation)
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+    session.rollback()
+
+
+def test_check_constraint_rejects_a_success_row_with_mismatched_total(session):
+    """Milestone 10.5 fix: proves the adapted CHECK constraint still
+    enforces the original Milestone 3 rule for SUCCESS rows specifically
+    -- status is set explicitly here (unlike the older test above, which
+    leaves it unset and would fail on the NOT NULL constraint alone) so
+    this is unambiguously testing the total-equals-sum-of-components half
+    of the constraint, not just any IntegrityError."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    bad_evaluation = models.Evaluation(
+        run_id=run.id,
+        status="SUCCESS",
+        trend_score=1,
+        structure_score=1,
+        entry_score=1,
+        risk_reward_score=1,
+        timing_context_score=1,
+        total_score=9999,
+    )
+    session.add(bad_evaluation)
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+    session.rollback()
+
+
+def test_check_constraint_permits_a_failed_row_with_all_null_scores(session):
+    """The other half of the same constraint: a FAILED row with every
+    score column (including total_score) null is a valid row -- this is
+    what makes it possible to store a failed evaluation at all."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    failed_evaluation = models.Evaluation(
+        run_id=run.id,
+        status="FAILED",
+        trend_score=None,
+        structure_score=None,
+        entry_score=None,
+        risk_reward_score=None,
+        timing_context_score=None,
+        total_score=None,
+        error_message="no successful agent analysis to score",
+    )
+    session.add(failed_evaluation)
+    session.commit()  # must not raise
+
+    session.refresh(failed_evaluation)
+    assert failed_evaluation.status == "FAILED"
+    assert failed_evaluation.total_score is None
+
+
+def test_check_constraint_rejects_a_failed_row_with_a_non_null_score(session):
+    """Guards the other direction too: a FAILED row is not allowed to
+    carry a real score on any component -- a half-failed, half-scored row
+    would be exactly the ambiguous state this whole fix exists to rule
+    out."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    inconsistent_evaluation = models.Evaluation(
+        run_id=run.id,
+        status="FAILED",
+        trend_score=0,
+        structure_score=None,
+        entry_score=None,
+        risk_reward_score=None,
+        timing_context_score=None,
+        total_score=None,
+        error_message="should be rejected",
+    )
+    session.add(inconsistent_evaluation)
 
     with pytest.raises(IntegrityError):
         session.commit()

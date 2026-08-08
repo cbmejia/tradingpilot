@@ -163,13 +163,48 @@ def add_agent_analysis(
     setup_assessment: str,
     uncertainty: str,
 ) -> AgentAnalysis:
+    """Record a SUCCESSFUL agent analysis. For a failed one, see
+    add_failed_agent_analysis() below -- status is always "SUCCESS" here,
+    never a parameter, so this function can never be used to store a
+    failure with fabricated qualitative fields."""
     analysis = AgentAnalysis(
         run_id=run_id,
+        status="SUCCESS",
         analysis_text=analysis_text,
         trend_assessment=trend_assessment,
         structure_assessment=structure_assessment,
         setup_assessment=setup_assessment,
         uncertainty=uncertainty,
+    )
+    session.add(analysis)
+    session.commit()
+    session.refresh(analysis)
+    return analysis
+
+
+def add_failed_agent_analysis(
+    session: Session,
+    *,
+    run_id: str,
+    error_message: str,
+) -> AgentAnalysis:
+    """
+    Record a FAILED agent analysis -- e.g. Claude's response was
+    unusable, or the analysis was never attempted because an upstream
+    stage (capture, market data) failed first. Every qualitative field is
+    null; nothing here is guessed or filled in. Milestone 10.5 fix: the
+    reason this function exists is so a failure has somewhere real to
+    live besides the audit_events text trail.
+    """
+    analysis = AgentAnalysis(
+        run_id=run_id,
+        status="FAILED",
+        analysis_text=None,
+        trend_assessment=None,
+        structure_assessment=None,
+        setup_assessment=None,
+        uncertainty=None,
+        error_message=error_message,
     )
     session.add(analysis)
     session.commit()
@@ -188,11 +223,14 @@ def add_evaluation(
     timing_context_score: int,
 ) -> Evaluation:
     """
-    Record a rubric evaluation for a run.
+    Record a SUCCESSFUL rubric evaluation for a run.
 
     total_score is always the sum of the five component scores, computed
     right here. There is deliberately no total_score parameter — the
     caller (including the future AI evaluation engine) cannot pass one in.
+    status is always "SUCCESS" here, never a parameter -- for a failed
+    evaluation, see add_failed_evaluation() below, which cannot be used to
+    smuggle in a score either (it has no score parameters at all).
     """
     total_score = (
         trend_score
@@ -203,12 +241,45 @@ def add_evaluation(
     )
     evaluation = Evaluation(
         run_id=run_id,
+        status="SUCCESS",
         trend_score=trend_score,
         structure_score=structure_score,
         entry_score=entry_score,
         risk_reward_score=risk_reward_score,
         timing_context_score=timing_context_score,
         total_score=total_score,
+    )
+    session.add(evaluation)
+    session.commit()
+    session.refresh(evaluation)
+    return evaluation
+
+
+def add_failed_evaluation(
+    session: Session,
+    *,
+    run_id: str,
+    error_message: str,
+) -> Evaluation:
+    """
+    Record a FAILED evaluation -- e.g. the risk/reward numbers were
+    incoherent, or there was no successful agent analysis to score in the
+    first place. Every score column, including total_score, is left null
+    -- never zero, since zero is a real, meaningful score and storing it
+    here would be indistinguishable from a genuine all-zero result.
+    Milestone 10.5 fix: the reason this function exists is so a failure
+    has somewhere real to live besides the audit_events text trail.
+    """
+    evaluation = Evaluation(
+        run_id=run_id,
+        status="FAILED",
+        trend_score=None,
+        structure_score=None,
+        entry_score=None,
+        risk_reward_score=None,
+        timing_context_score=None,
+        total_score=None,
+        error_message=error_message,
     )
     session.add(evaluation)
     session.commit()

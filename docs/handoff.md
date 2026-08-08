@@ -8,24 +8,34 @@ the root [README.md](../README.md).
 
 ## 1. Current state
 
-- **Milestones 1–10.5 are complete.** Milestone 11 (UI, including the
-  Tailwind migration) is next. Milestone 12 (testing) is after that.
-- **Latest commit:** "Milestone 10.5 - orchestrator wires the 12-step
-  pipeline".
-- **Test count:** 183 tests, all passing (19 database + 25 API + 17
+- **Milestones 1–10.5 are complete**, including the Milestone 10.5 fix
+  (failure states on analysis/evaluation records). Milestone 11 (UI,
+  including the Tailwind migration) is next. Milestone 12 (testing) is
+  after that.
+- **Latest commit:** "Milestone 10.5 fix - failure states on analysis and
+  evaluation records".
+- **Test count:** 188 tests, all passing (24 database + 25 API + 17
   capture + 19 market data + 25 agent + 32 evaluation + 36 guardrails +
   10 orchestrator). See the roadmap checklist at the bottom of
   [docs/iterations.md](iterations.md) for the full milestone list.
-- **The orchestrator exists now.** `backend/orchestrator.py`'s
+- **The orchestrator exists.** `backend/orchestrator.py`'s
   `run_pipeline()`, called via `POST /runs/{run_id}/analyze`, actually
   runs capture → market data → agent → evaluation → guardrails in order
   for one run and persists every step, synchronously, in a single
   request. `capture/`, `tools/market_data.py`, `agents/trade_agent.py`,
   `evals/trade_evaluator.py`, and `guardrails/rules.py` themselves are
   unchanged — still standalone, independently callable modules; the
-  orchestrator only calls them in sequence. See "How to run everything"
-  below, and the Milestone 10.5 entry in
-  [docs/iterations.md](iterations.md), for the exact request sequence.
+  orchestrator only calls them in sequence.
+- **`agent_analyses` and `evaluations` now carry `status`/
+  `error_message`**, matching `captures`/`market_data`, and a `FAILED`
+  row is a real row (never zeros, never a fabricated string) rather than
+  something only visible in `audit_events`. This was a real gap flagged
+  in Milestone 10.5 and closed immediately after, before any UI got
+  built against the old shape — see that entry and the "Milestone 10.5
+  fix" entry in [docs/iterations.md](iterations.md) for the exact schema
+  and the adapted `CHECK` constraint.
+- See "How to run everything" below for the exact request sequence to
+  exercise the pipeline by hand.
 
 ## 2. The non-negotiable invariants
 
@@ -156,20 +166,16 @@ standalone tool:
   to avoid churning the shell twice. The orchestrator this milestone
   needs (Milestone 10.5) is already done.
 - **Milestone 12 — Testing.** What this covers beyond the substantial
-  unit-test suite that already exists (183 tests across every backend
+  unit-test suite that already exists (188 tests across every backend
   module, including the orchestrator) isn't yet decided — likely
   candidates are frontend tests and an end-to-end pass, but that should
   be scoped as its own milestone discussion, not assumed here.
-- **A known schema gap, flagged but not fixed in Milestone 10.5** (it
-  was out of that milestone's approved scope): the `agent_analyses` and
-  `evaluations` tables (Milestone 3) have no `status`/`error_message`
-  columns, and their score columns are `NOT NULL` — so a *failed* agent
-  analysis or evaluation can't be stored as a structured row; the
-  orchestrator records the real failure in `audit_events` instead. The
-  same tables also never gained columns for the five categorical fields
-  the agent produces (`trend_direction`, `trend_quality`,
-  `structure_quality`, `setup_quality`, `context_risk`) — a gap from the
-  Milestone 8 revision. A successful analysis's audit-event text is
-  currently the only place those five values are visible after the
-  fact. Worth a small, independent fix at some point — see the
-  Milestone 10.5 entry in [docs/iterations.md](iterations.md).
+- **A known, still-open gap** (out of scope for the Milestone 10.5 fix,
+  which only closed the status/error-message gap): `agent_analyses` has
+  no columns for the five categorical fields the agent produces
+  (`trend_direction`, `trend_quality`, `structure_quality`,
+  `setup_quality`, `context_risk`) — a gap from the Milestone 8 revision.
+  A successful analysis's audit-event text is currently the only place
+  those five values are visible after the fact. Worth a small,
+  independent fix at some point — see the "Milestone 10.5 fix" entry in
+  [docs/iterations.md](iterations.md).
