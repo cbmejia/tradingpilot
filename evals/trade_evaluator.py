@@ -161,7 +161,7 @@ def _score_risk_reward(rr_ratio: float) -> int:
     return 0
 
 
-def _compute_risk_reward(
+def compute_risk_reward(
     direction: Optional[str],
     entry: Optional[float],
     stop: Optional[float],
@@ -173,6 +173,10 @@ def _compute_risk_reward(
     Returns (ratio, None) on success, or (None, reason) if the inputs are
     missing or incoherent. Never returns a guessed ratio -- every failure
     path returns None for the ratio.
+
+    Public (not `_`-prefixed) because guardrails/rules.py's
+    TRADE_PARAMS_VALID check reuses this exact function rather than
+    re-implementing the same LONG/SHORT arithmetic a second time.
     """
     missing = [
         name
@@ -246,7 +250,7 @@ def evaluate(
             f"{agent_analysis.status.value}{detail}"
         )
 
-    rr_ratio, rr_error = _compute_risk_reward(
+    rr_ratio, rr_error = compute_risk_reward(
         trade_params.direction, trade_params.entry, trade_params.stop, trade_params.target
     )
     if rr_error is not None:

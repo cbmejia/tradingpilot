@@ -43,7 +43,7 @@ These are structural, not configurable:
 | Market data tool | `tools/market_data.py` | Fetches a structured market snapshot for the selected symbol. Same LIVE/DEMO split as the screenshot tool. |
 | Economic calendar tool | `tools/economic_calendar.py` | Contextual input for later; not wired into the workflow yet. |
 | Evaluation engine | `evals/trade_evaluator.py` | Pure, deterministic function: agent output + trade params → a rubric score with a component breakdown. No LLM call inside it. See "Evaluation engine design" below and [docs/rubric.md](rubric.md) for the full rubric. |
-| Guardrails | `guardrails/rules.py` | Deterministic checks (RR, freshness, input validity, confidence). Returns PASS / REQUIRES_REVIEW / BLOCKED with reasons. |
+| Guardrails | `guardrails/rules.py` | Eleven deterministic checks (RR, freshness, input validity, uncertainty, synthetic-data). Returns `BLOCKED` / `REQUIRES_REVIEW` / `READY_FOR_REVIEW` with a reason per check. See "Guardrails design" below. |
 | Database | `database/` | SQLAlchemy models and session management for the audit trail. Schema is defined in Milestone 3 — this milestone only sets up the package. |
 | Logs | `logs/` | Operational logs (step timing, tool errors). Separate from the audit trail, which lives in the database. |
 
@@ -234,6 +234,49 @@ component reads and what earns 20 vs. 10 vs. 0 — is written out in
 This engine only scores — it does not decide pass/fail. Thresholds for
 what score (combined with data freshness, RR minimums, and confidence)
 is good enough to recommend are Milestone 9's guardrails, not this file.
+
+## Guardrails design
+
+`guardrails/rules.py`'s `evaluate_guardrails(capture_result,
+market_data_result, agent_analysis, evaluation_result, trade_params) ->
+GuardrailReport` runs eleven independent, deterministic checks — no AI
+call, no randomness — every time, never short-circuiting on an earlier
+failure, so the audit trail always shows the complete picture. Full
+table of every rule, its threshold, and what happens when it fails is in
+the Milestone 9 entry of [docs/iterations.md](iterations.md).
+
+**Guardrails can only downgrade.** The eleven rules split into two
+groups: seven "blocking" rules (capture/market-data/analysis/evaluation
+each succeeding and being fresh, plus trade params being coherent) where
+any failure means there's nothing meaningful to show a human at all —
+those force `BLOCKED`. Four "review-forcing" rules (risk/reward meeting
+its minimum, uncertainty not being `HIGH`, the score meeting its
+minimum, and the data not being synthetic) where a failure means the
+pipeline worked but the result isn't good, certain, or real enough to
+skip a human's judgment — those force `REQUIRES_REVIEW`. If nothing
+fails, the outcome is `READY_FOR_REVIEW`. There is no fourth state and
+no code path that produces one — nothing in this system approves a run
+without a human; that's Milestone 10.
+
+**The `SYNTHETIC_DATA` rule is absolute.** If either the chart capture or
+the market data came from DEMO mode, the run can never reach
+`READY_FOR_REVIEW` — not even with a perfect 100 score and every other
+rule passing (verified directly by a test). A run built on sample data
+must never be presentable as a validated live one.
+
+**Freshness is the one place "deterministic" includes a clock reading,
+on purpose** — `CAPTURE_FRESH` and `MARKET_DATA_FRESH` compare
+timezone-aware UTC timestamps (`captured_at`, and the market quote's
+*source* timestamp, never a fetch time) against a `now` parameter that
+defaults to the real clock but can be pinned by tests, so "same inputs,
+same verdict" still holds exactly — the clock reading is an explicit
+input, not an implicit ambient one.
+
+All four thresholds (`CAPTURE_MAX_AGE_SECONDS`, `MARKET_DATA_MAX_AGE_
+SECONDS`, `MIN_RISK_REWARD`, `MIN_TOTAL_SCORE`) come from `.env`, with
+`MIN_TOTAL_SCORE`'s default (60) chosen deliberately between the
+MEDIUM-uncertainty ceiling (76) and the HIGH-uncertainty ceiling (52) —
+see the Milestone 9 entry in `docs/iterations.md` for the full reasoning.
 
 ## Data flow (per run)
 

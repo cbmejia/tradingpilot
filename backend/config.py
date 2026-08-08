@@ -26,3 +26,11 @@ CAPTURE_MODE = os.getenv("CAPTURE_MODE", "demo")
 MARKET_DATA_MODE = os.getenv("MARKET_DATA_MODE", "demo")
 CLAUDE_MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")  # None if unset -- never invented
+
+# Guardrail thresholds (guardrails/rules.py reads these itself, from the
+# same env vars, to stay isolated/standalone -- declared here too just so
+# every configurable value in the app is visible in one place).
+CAPTURE_MAX_AGE_SECONDS = float(os.getenv("CAPTURE_MAX_AGE_SECONDS", "300"))
+MARKET_DATA_MAX_AGE_SECONDS = float(os.getenv("MARKET_DATA_MAX_AGE_SECONDS", "900"))
+MIN_RISK_REWARD = float(os.getenv("MIN_RISK_REWARD", "1.0"))
+MIN_TOTAL_SCORE = int(os.getenv("MIN_TOTAL_SCORE", "60"))

@@ -539,6 +539,96 @@ not by paragraph length.
 All 122 tests pass (19 database + 11 API + 17 capture + 18 market data +
 25 agent + 32 evaluation).
 
+## Milestone 9 — Deterministic guardrails
+
+Built `guardrails/rules.py`'s `evaluate_guardrails(capture_result,
+market_data_result, agent_analysis, evaluation_result, trade_params) ->
+GuardrailReport`: eleven independent, deterministic checks, always all
+eleven evaluated (no short-circuiting), reduced to one of exactly three
+outcomes — `BLOCKED`, `REQUIRES_REVIEW`, `READY_FOR_REVIEW`. There is no
+fourth state and no code path that approves anything; that's Milestone 10.
+
+**Threshold defaults proposed and reasoned about before writing any
+code** (all read from `.env`, none hardcoded inline):
+
+| Threshold | Default | Reasoning |
+|---|---|---|
+| `CAPTURE_MAX_AGE_SECONDS` | 300 (5 min) | Generous enough for a slow LIVE Playwright capture plus the Claude call in the same run; tight enough to catch a stale/reused screenshot. |
+| `MARKET_DATA_MAX_AGE_SECONDS` | 900 (15 min) | Alpha Vantage's free tier isn't tick-by-tick and can lag by minutes; tolerates that without being so loose a genuinely old quote passes. Demo quotes (fixed 2024 timestamps) always fail this — expected, since `SYNTHETIC_DATA` forces review on demo runs regardless. |
+| `MIN_RISK_REWARD` | 1.0 | Matches the evaluator's own "poor" cutoff (RR < 1.0 scores 0 points) — the guardrail floor and the rubric's zero-point line are the same number on purpose. |
+| `MIN_TOTAL_SCORE` | 60 | Below MEDIUM's ceiling (76), so a genuinely good MEDIUM-confidence setup can still pass; above HIGH's ceiling (52), so `SCORE_THRESHOLD` alone would catch every HIGH-uncertainty run even if `UNCERTAINTY_ACCEPTABLE` were somehow bypassed — deliberate redundancy. ~60% of the absolute max (100), an intuitive "clearly good, not just mediocre" bar. |
+
+**The rubric:**
+
+| # | Guardrail | Checks | Threshold | On failure |
+|---|---|---|---|---|
+| a | `CAPTURE_SUCCEEDED` | Chart capture status is `SUCCESS` | — | **Blocks.** |
+| b | `CAPTURE_FRESH` | `captured_at` age vs. `now`, both timezone-aware UTC | `CAPTURE_MAX_AGE_SECONDS` | **Blocks.** |
+| c | `MARKET_DATA_SUCCEEDED` | Market data status is `SUCCESS` | — | **Blocks.** |
+| d | `MARKET_DATA_FRESH` | The quote's **source** timestamp age vs. `now` (never fetch time) | `MARKET_DATA_MAX_AGE_SECONDS` | **Blocks.** |
+| e | `ANALYSIS_SUCCEEDED` | Agent analysis status is `SUCCESS` | — | **Blocks.** |
+| f | `EVALUATION_SUCCEEDED` | Evaluation status is `SUCCESS` | — | **Blocks.** |
+| g | `RISK_REWARD_MINIMUM` | `evaluation_result.risk_reward_ratio` | `MIN_RISK_REWARD` | **Forces review.** |
+| h | `TRADE_PARAMS_VALID` | entry/stop/target/direction present and coherent (reuses `evals.compute_risk_reward`) | — | **Blocks.** |
+| i | `UNCERTAINTY_ACCEPTABLE` | Agent `uncertainty` is not `HIGH` | — | **Forces review.** |
+| j | `SCORE_THRESHOLD` | `evaluation_result.total_score` | `MIN_TOTAL_SCORE` | **Forces review.** |
+| k | `SYNTHETIC_DATA` | Neither capture mode nor market-data mode is `DEMO` | — | **Forces review, always — never blockable by a good score.** |
+
+Rules a/b/c/d/e/f/h are **blocking**: their failure means the pipeline
+itself produced nothing usable, so there's nothing meaningful to review
+— any one of them failing forces `BLOCKED`, regardless of the other ten.
+Rules g/i/j/k are **review-forcing**: the pipeline worked, but the
+result isn't good/certain/real enough to skip a human — any one failing
+forces `REQUIRES_REVIEW` (unless a blocking rule also failed, which wins).
+`READY_FOR_REVIEW` only happens when all eleven pass.
+
+- **No short-circuiting.** All eleven rules run and all eleven results
+  are recorded every time, confirmed by a test that breaks
+  `CAPTURE_SUCCEEDED` and checks the other ten (including passing ones)
+  are still present and correctly evaluated in the report.
+- **`TRADE_PARAMS_VALID` reuses the evaluator's own arithmetic.**
+  `evals/trade_evaluator.py`'s `_compute_risk_reward()` was renamed to
+  the public `compute_risk_reward()` specifically so guardrails could
+  call the exact same LONG/SHORT logic rather than re-implementing it a
+  second time (and risking the two definitions drifting apart).
+  `RISK_REWARD_MINIMUM`, by contrast, reads `EvaluationResult.
+  risk_reward_ratio` directly — a field the evaluator's own docstring
+  already flagged as "included ... for the Milestone 9 guardrail."
+- **Freshness checks are explicitly time-dependent, on purpose** (rule 1
+  carves out "no time-dependent behavior *except where explicitly
+  required*"). `now` is a real parameter, defaulting to
+  `datetime.now(timezone.utc)` for production use but overridable by
+  tests — so "same inputs, same verdict" holds exactly, with the clock
+  reading treated as an explicit input rather than an implicit ambient
+  one.
+- **`SYNTHETIC_DATA` cannot be outscored.** It's a review-forcing rule
+  like the other three, but unlike `SCORE_THRESHOLD` or
+  `RISK_REWARD_MINIMUM`, no total score or ratio can make it pass — it
+  only reads `capture_result.mode` and `market_data_result.mode`.
+  Verified directly: a run with every other rule passing and a perfect
+  100 score still lands on `REQUIRES_REVIEW`, never `READY_FOR_REVIEW`,
+  the moment either mode is `DEMO`.
+- `tests/test_guardrails.py` — 31 tests: a full passing baseline
+  (`READY_FOR_REVIEW`), confirmation all 11 named checks are always
+  present, the no-short-circuit test, pass/fail pairs for all eleven
+  rules individually (stale capture using a timestamp set 2 hours in the
+  past, stale market quote via the source timestamp, RR below minimum
+  forcing review rather than blocking, missing/incoherent trade params
+  blocking, HIGH uncertainty and DEMO-sourced data each independently
+  proven to force review even with a perfect 100 score and everything
+  else passing), the "no approved state" check on the enum itself, and
+  determinism for both a passing and a blocked scenario.
+
+Manually ran two examples from the terminal (see README): a `BLOCKED`
+run (a 2-hour-old chart capture — `CAPTURE_FRESH` fails, everything else
+passes) and a `READY_FOR_REVIEW` run (fresh LIVE capture and market
+data, LOW uncertainty, RR 2.0, score 100) — both showing the real
+per-rule pass/fail breakdown, not just the final outcome.
+
+Not wired into the orchestrator or the frontend, and no guardrails API
+endpoint was added. All 153 tests pass (19 database + 11 API + 17
+capture + 18 market data + 25 agent + 32 evaluation + 31 guardrails).
+
 ## Rebuilding the database
 
 `init_db()` only ever adds tables that don't exist yet — it never alters
@@ -569,7 +659,7 @@ isn't forgotten.
 6. ~~Market-data tool~~
 7. ~~Agent loop~~
 8. ~~Evaluation~~
-9. Guardrails
+9. ~~Guardrails~~
 10. Human approval
 11. UI (incl. Tailwind migration)
 12. Testing

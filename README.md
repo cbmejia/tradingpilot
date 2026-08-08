@@ -23,7 +23,7 @@ what's next.
 - `capture/` — chart capture tool: `CaptureProvider` interface, `DemoProvider` (offline fixtures), `LiveProvider` (Playwright), `CaptureManager` (picks one, never falls back)
 - `tools/` — `market_data.py` (`MarketDataProvider`/`DemoMarketDataProvider`/`LiveMarketDataProvider`/`MarketDataManager`, same pattern as `capture/`) and economic calendar (chart capture lives in `capture/` — see above)
 - `evals/` — deterministic rubric scoring of the agent's analysis
-- `guardrails/` — hard safety rules (RR, freshness, validity, confidence) the agent may never bypass
+- `guardrails/` — eleven deterministic checks (RR, freshness, validity, uncertainty, synthetic-data) that can only downgrade a run toward `REQUIRES_REVIEW` or `BLOCKED`, never approve one
 - `database/` — SQLAlchemy models and persistence for the full audit trail
 - `prompts/` — versioned markdown prompt templates
 - `screenshots/` — captured chart images (`live/` and `demo/`)
@@ -134,6 +134,11 @@ analysis = AgentAnalysisResult(
     structure_assessment='Stair-step structure, minimal overlap between recent candles.',
     setup_assessment='Pullback to the trendline, holding as support, a readable entry point.',
     uncertainty='MEDIUM',
+    trend_direction='UP',
+    trend_quality='STRONG',
+    structure_quality='CLEAN',
+    setup_quality='ACCEPTABLE',
+    context_risk='LOW',
     timestamp=datetime.now(timezone.utc),
     error_message=None,
 )
@@ -145,7 +150,55 @@ print(evaluate(analysis, params))
 See [docs/rubric.md](docs/rubric.md) for the full scoring table and the
 same example worked out by hand.
 
+## Checking guardrails by hand
+
+Also pure computation — no network, no API key needed. This builds a
+`BLOCKED` example (a 2-hour-old chart capture) and prints every rule's
+pass/fail result, not just the final outcome:
+
+```bash
+python -c "
+from datetime import datetime, timedelta, timezone
+from capture.base import CaptureMode, CaptureResult, CaptureStatus
+from tools.market_data import MarketDataMode, MarketDataStatus, MarketQuote
+from agents.trade_agent import AgentAnalysisResult, AgentAnalysisStatus, TradeParams
+from evals.trade_evaluator import evaluate
+from guardrails.rules import evaluate_guardrails
+
+now = datetime.now(timezone.utc)
+capture = CaptureResult(
+    mode=CaptureMode.LIVE, symbol='EURUSD', timeframe='1h',
+    screenshot_path='screenshots/live/EURUSD_1h_old.png',
+    captured_at=now - timedelta(hours=2), status=CaptureStatus.SUCCESS, error_message=None,
+)
+market_data = MarketQuote(
+    mode=MarketDataMode.LIVE, symbol='EURUSD', price=1.0950,
+    timestamp=now - timedelta(seconds=10), source='alpha_vantage',
+    status=MarketDataStatus.SUCCESS, error_message=None,
+)
+analysis = AgentAnalysisResult(
+    status=AgentAnalysisStatus.SUCCESS,
+    analysis_text='Uptrend.', trend_assessment='Up.', structure_assessment='Clean.', setup_assessment='Good.',
+    uncertainty='LOW', trend_direction='UP', trend_quality='STRONG', structure_quality='CLEAN',
+    setup_quality='TEXTBOOK', context_risk='LOW', timestamp=now, error_message=None,
+)
+params = TradeParams(direction='long', entry=1.0950, stop=1.0900, target=1.1050)
+evaluation = evaluate(analysis, params)
+
+report = evaluate_guardrails(capture, market_data, analysis, evaluation, params, now=now)
+print('outcome:', report.outcome)
+for c in report.checks:
+    print(f'  {c.name}: {\"PASS\" if c.passed else \"FAIL\"} -- {c.reason}')
+"
+```
+
+Change `captured_at=now - timedelta(hours=2)` to
+`captured_at=now - timedelta(seconds=15)` to see the same run reach
+`READY_FOR_REVIEW` instead. See the Milestone 9 entry in
+[docs/iterations.md](docs/iterations.md) for the full table of all
+eleven rules, their thresholds, and what each one does on failure.
+
 ## Status
 
-Milestone 8 of 12: deterministic evaluation engine. See
+Milestone 9 of 12: deterministic guardrails. See
 [docs/iterations.md](docs/iterations.md).
