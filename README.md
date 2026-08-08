@@ -32,5 +32,5 @@ what's next.
 
 ## Status
 
-Milestone 2 of 12: architecture and folder structure. See
+Milestone 3 of 12: database schema and audit trail. See
 [docs/iterations.md](docs/iterations.md).
