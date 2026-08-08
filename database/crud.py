@@ -17,6 +17,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from database.models import (
+    AGENT_CATEGORICAL_FIELDS,
     AgentAnalysis,
     AuditEvent,
     Capture,
@@ -26,6 +27,29 @@ from database.models import (
     MarketData,
     Run,
 )
+
+
+def _validate_categorical_fields(**fields: Optional[str]) -> None:
+    """
+    Application-level half of the categorical-field check (the other half
+    is the CHECK constraint on AgentAnalysis in database/models.py).
+    Enforced here too, not just at the database level, because a Python
+    ValueError with the actual bad value and its allowed set is a much
+    clearer failure than a generic SQLite IntegrityError -- and because
+    this is the same defense-in-depth pattern the rest of this file
+    already uses (e.g. the Evaluation CHECK constraint backstops
+    add_evaluation()'s own total_score computation). agents/trade_agent.py
+    already validates these before an analysis is ever accepted as
+    SUCCESS, so in the normal path this never fires -- it exists for
+    whatever calls this function next, including a future caller that
+    isn't as careful.
+    """
+    for name, value in fields.items():
+        if value is None:
+            continue
+        allowed = AGENT_CATEGORICAL_FIELDS[name]
+        if value not in allowed:
+            raise ValueError(f"{name}={value!r} is not one of the allowed values {allowed}")
 
 
 def create_run(
@@ -162,11 +186,37 @@ def add_agent_analysis(
     structure_assessment: str,
     setup_assessment: str,
     uncertainty: str,
+    trend_direction: str,
+    trend_quality: str,
+    structure_quality: str,
+    setup_quality: str,
+    context_risk: str,
 ) -> AgentAnalysis:
-    """Record a SUCCESSFUL agent analysis. For a failed one, see
-    add_failed_agent_analysis() below -- status is always "SUCCESS" here,
-    never a parameter, so this function can never be used to store a
-    failure with fabricated qualitative fields."""
+    """
+    Record a SUCCESSFUL agent analysis -- including the five categorical
+    fields the evaluator actually scores from (Milestone 10.5 fix 2), so
+    a run's score can always be traced back to the observation that
+    produced it. All five are required (not optional/defaulted): a real
+    SUCCESS analysis always has all of them, and a caller that forgot one
+    should get a loud TypeError, not a silently incomplete row.
+
+    Each categorical value is validated against its own allowed set
+    before anything is written -- see _validate_categorical_fields()
+    above for why this check exists here too, not just as the CHECK
+    constraint on AgentAnalysis.
+
+    For a failed analysis, see add_failed_agent_analysis() below --
+    status is always "SUCCESS" here, never a parameter, so this function
+    can never be used to store a failure with fabricated qualitative
+    fields.
+    """
+    _validate_categorical_fields(
+        trend_direction=trend_direction,
+        trend_quality=trend_quality,
+        structure_quality=structure_quality,
+        setup_quality=setup_quality,
+        context_risk=context_risk,
+    )
     analysis = AgentAnalysis(
         run_id=run_id,
         status="SUCCESS",
@@ -175,6 +225,11 @@ def add_agent_analysis(
         structure_assessment=structure_assessment,
         setup_assessment=setup_assessment,
         uncertainty=uncertainty,
+        trend_direction=trend_direction,
+        trend_quality=trend_quality,
+        structure_quality=structure_quality,
+        setup_quality=setup_quality,
+        context_risk=context_risk,
     )
     session.add(analysis)
     session.commit()
@@ -204,6 +259,11 @@ def add_failed_agent_analysis(
         structure_assessment=None,
         setup_assessment=None,
         uncertainty=None,
+        trend_direction=None,
+        trend_quality=None,
+        structure_quality=None,
+        setup_quality=None,
+        context_risk=None,
         error_message=error_message,
     )
     session.add(analysis)

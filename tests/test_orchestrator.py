@@ -193,10 +193,19 @@ def test_every_stage_result_is_persisted_and_readable_via_get_run(client):
     assert full_run["market_data"][0]["source"] == "demo_fixture"
 
     assert len(full_run["analyses"]) == 1
-    assert full_run["analyses"][0]["status"] == "SUCCESS"
-    assert full_run["analyses"][0]["error_message"] is None
-    assert full_run["analyses"][0]["uncertainty"] == "MEDIUM"
-    assert full_run["analyses"][0]["analysis_text"]
+    analysis = full_run["analyses"][0]
+    assert analysis["status"] == "SUCCESS"
+    assert analysis["error_message"] is None
+    assert analysis["uncertainty"] == "MEDIUM"
+    assert analysis["analysis_text"]
+    # Milestone 10.5 fix 2: the categorical fields the evaluator actually
+    # scored from are on the record itself -- a Trend score of 14 (below)
+    # can be traced back to trend_direction=UP + trend_quality=STRONG.
+    assert analysis["trend_direction"] == "UP"
+    assert analysis["trend_quality"] == "STRONG"
+    assert analysis["structure_quality"] == "CLEAN"
+    assert analysis["setup_quality"] == "ACCEPTABLE"
+    assert analysis["context_risk"] == "LOW"
 
     assert len(full_run["evaluations"]) == 1
     assert full_run["evaluations"][0]["status"] == "SUCCESS"
@@ -325,6 +334,11 @@ def test_failed_agent_analysis_is_recorded_as_a_row_and_not_evaluated(client):
     assert analysis["structure_assessment"] is None
     assert analysis["setup_assessment"] is None
     assert analysis["uncertainty"] is None
+    assert analysis["trend_direction"] is None
+    assert analysis["trend_quality"] is None
+    assert analysis["structure_quality"] is None
+    assert analysis["setup_quality"] is None
+    assert analysis["context_risk"] is None
 
     # Not evaluated -- but still recorded as a FAILED row, not an absence.
     assert len(body["evaluations"]) == 1

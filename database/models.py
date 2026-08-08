@@ -19,6 +19,32 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from database.database import Base
 from database.types import TZDateTime
 
+# The five categorical fields the agent (agents/trade_agent.py) produces
+# and the evaluator (evals/trade_evaluator.py) scores from, and the exact
+# allowed set for each. Duplicated here rather than imported from
+# agents.trade_agent so database/ stays a leaf module with no dependency
+# on the agent layer (database/ is imported BY agents/evals/guardrails
+# indirectly via backend/orchestrator.py, never the other way around).
+# Kept from drifting apart by a dedicated test in tests/test_database.py
+# that asserts this dict is identical to agents.trade_agent.CATEGORICAL_
+# FIELDS.
+AGENT_CATEGORICAL_FIELDS: dict[str, tuple[str, ...]] = {
+    "trend_direction": ("UP", "DOWN", "SIDEWAYS", "UNCLEAR"),
+    "trend_quality": ("STRONG", "MODERATE", "WEAK", "UNCLEAR"),
+    "structure_quality": ("CLEAN", "MIXED", "CHOPPY", "UNCLEAR"),
+    "setup_quality": ("TEXTBOOK", "ACCEPTABLE", "MARGINAL", "NONE", "UNCLEAR"),
+    "context_risk": ("LOW", "MODERATE", "ELEVATED", "UNCLEAR"),
+}
+
+
+def _categorical_allowed_check(column_name: str) -> str:
+    """Builds a '<column> IS NULL OR <column> IN (...)' CHECK expression
+    from AGENT_CATEGORICAL_FIELDS, so the allowed-values list is written
+    down exactly once (here) rather than duplicated as a second literal
+    string per column."""
+    values = "', '".join(AGENT_CATEGORICAL_FIELDS[column_name])
+    return f"{column_name} IS NULL OR {column_name} IN ('{values}')"
+
 
 def _new_run_id() -> str:
     return uuid4().hex
@@ -119,7 +145,8 @@ class MarketData(Base):
 class AgentAnalysis(Base):
     """
     The agent's qualitative read of the chart and market data -- success
-    or failure alike (Milestone 10.5 fix).
+    or failure alike (Milestone 10.5 fix), including the five categorical
+    fields the evaluator actually scores from (Milestone 10.5 fix 2).
 
     Deliberately no numeric fields here — trend/structure/setup/uncertainty
     are all text. Turning qualitative analysis into a number is the
@@ -127,15 +154,51 @@ class AgentAnalysis(Base):
 
     status/error_message follow the exact same success-or-failure shape
     Capture and MarketData already use. On FAILED, every qualitative
-    field below is left null and error_message carries the real reason --
-    never a fabricated placeholder analysis. This table intentionally has
-    no CHECK constraint tying status to nullability (matching Capture and
-    MarketData, neither of which has one either); Evaluation is the one
-    table that needs one, because it alone already had to enforce
-    total_score = sum of components.
+    field below (including the five categorical ones) is left null and
+    error_message carries the real reason -- never a fabricated
+    placeholder analysis.
+
+    trend_direction/trend_quality/structure_quality/setup_quality/
+    context_risk are the exact fields evals/trade_evaluator.py reads to
+    compute trend_score/structure_score/entry_score/timing_context_score
+    -- storing them here is what lets a completed run's score be traced
+    back to the observation that produced it, rather than showing e.g.
+    "Trend: 14" with no record of what was actually observed. Each is
+    constrained to its own documented allowed set (AGENT_CATEGORICAL_
+    FIELDS above) by a CHECK constraint -- the database-level half of a
+    deliberate double check; see database/crud.py's
+    add_agent_analysis() for the application-level half, which runs
+    first and gives a clearer Python-level error.
+
+    This table intentionally has no CHECK constraint tying status to
+    nullability (matching Capture and MarketData, neither of which has
+    one either); Evaluation is the one table that needs one, because it
+    alone already had to enforce total_score = sum of components.
     """
 
     __tablename__ = "agent_analyses"
+    __table_args__ = (
+        CheckConstraint(
+            _categorical_allowed_check("trend_direction"),
+            name="ck_agent_analyses_trend_direction_allowed",
+        ),
+        CheckConstraint(
+            _categorical_allowed_check("trend_quality"),
+            name="ck_agent_analyses_trend_quality_allowed",
+        ),
+        CheckConstraint(
+            _categorical_allowed_check("structure_quality"),
+            name="ck_agent_analyses_structure_quality_allowed",
+        ),
+        CheckConstraint(
+            _categorical_allowed_check("setup_quality"),
+            name="ck_agent_analyses_setup_quality_allowed",
+        ),
+        CheckConstraint(
+            _categorical_allowed_check("context_risk"),
+            name="ck_agent_analyses_context_risk_allowed",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
@@ -145,6 +208,11 @@ class AgentAnalysis(Base):
     structure_assessment: Mapped[str | None] = mapped_column(String(200), nullable=True)
     setup_assessment: Mapped[str | None] = mapped_column(String(200), nullable=True)
     uncertainty: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    trend_direction: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    trend_quality: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    structure_quality: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    setup_quality: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    context_risk: Mapped[str | None] = mapped_column(String(20), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
 

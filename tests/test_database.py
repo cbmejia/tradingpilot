@@ -215,6 +215,10 @@ def test_save_market_data_failure_records_error(session):
 
 
 def test_save_agent_analysis(session):
+    """Milestone 10.5 fix 2: a SUCCESS analysis stores all five
+    categorical fields the evaluator scores from, not just the prose --
+    they're required parameters, so a real SUCCESS row can never be
+    missing them."""
     run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
 
     analysis = crud.add_agent_analysis(
@@ -225,18 +229,127 @@ def test_save_agent_analysis(session):
         structure_assessment="higher highs and higher lows",
         setup_assessment="pullback to support",
         uncertainty="medium",
+        trend_direction="UP",
+        trend_quality="STRONG",
+        structure_quality="CLEAN",
+        setup_quality="ACCEPTABLE",
+        context_risk="LOW",
     )
 
     assert analysis.run_id == run.id
     assert analysis.trend_assessment == "uptrend"
     assert analysis.status == "SUCCESS"
     assert analysis.error_message is None
+    assert analysis.trend_direction == "UP"
+    assert analysis.trend_quality == "STRONG"
+    assert analysis.structure_quality == "CLEAN"
+    assert analysis.setup_quality == "ACCEPTABLE"
+    assert analysis.context_risk == "LOW"
+
+
+def test_save_agent_analysis_categorical_fields_round_trip(session):
+    """The five categorical fields survive a real commit + refresh cycle
+    unchanged -- not just held in the Python object before it's saved."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    crud.add_agent_analysis(
+        session,
+        run_id=run.id,
+        analysis_text="Choppy, no clean structure.",
+        trend_assessment="sideways",
+        structure_assessment="overlapping candles",
+        setup_assessment="no clear entry",
+        uncertainty="high",
+        trend_direction="SIDEWAYS",
+        trend_quality="WEAK",
+        structure_quality="CHOPPY",
+        setup_quality="NONE",
+        context_risk="ELEVATED",
+    )
+
+    reloaded = crud.get_run(session, run.id)
+    stored = reloaded.analyses[0]
+    assert stored.trend_direction == "SIDEWAYS"
+    assert stored.trend_quality == "WEAK"
+    assert stored.structure_quality == "CHOPPY"
+    assert stored.setup_quality == "NONE"
+    assert stored.context_risk == "ELEVATED"
+
+
+def test_add_agent_analysis_rejects_an_out_of_set_categorical_value(session):
+    """Milestone 10.5 fix 2, application-level check: an out-of-set
+    categorical value is rejected before anything is written -- the same
+    values agents/trade_agent.py's own validation already rejects, caught
+    a second time at the write boundary."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    with pytest.raises(ValueError, match="trend_direction"):
+        crud.add_agent_analysis(
+            session,
+            run_id=run.id,
+            analysis_text="x",
+            trend_assessment="x",
+            structure_assessment="x",
+            setup_assessment="x",
+            uncertainty="medium",
+            trend_direction="DIAGONAL",  # not a real value
+            trend_quality="STRONG",
+            structure_quality="CLEAN",
+            setup_quality="ACCEPTABLE",
+            context_risk="LOW",
+        )
+
+    # Nothing was written -- the rejected attempt left no row behind.
+    reloaded = crud.get_run(session, run.id)
+    assert reloaded.analyses == []
+
+
+def test_check_constraint_rejects_an_out_of_set_categorical_value(session):
+    """Milestone 10.5 fix 2, database-level check: even bypassing
+    crud.py entirely and constructing AgentAnalysis directly, the CHECK
+    constraint on each categorical column refuses an out-of-set value --
+    the backstop for the case where some future code doesn't go through
+    add_agent_analysis()."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    bad_analysis = models.AgentAnalysis(
+        run_id=run.id,
+        status="SUCCESS",
+        analysis_text="x",
+        trend_assessment="x",
+        structure_assessment="x",
+        setup_assessment="x",
+        uncertainty="MEDIUM",
+        trend_direction="DIAGONAL",  # not a real value
+        trend_quality="STRONG",
+        structure_quality="CLEAN",
+        setup_quality="ACCEPTABLE",
+        context_risk="LOW",
+    )
+    session.add(bad_analysis)
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+    session.rollback()
+
+
+def test_agent_categorical_allowed_values_match_the_agent_layer():
+    """Drift guard: database.models.AGENT_CATEGORICAL_FIELDS is
+    duplicated from agents.trade_agent.CATEGORICAL_FIELDS on purpose (so
+    database/ stays a leaf module with no dependency on the agent layer)
+    -- this test is what keeps the two from silently diverging."""
+    from agents.trade_agent import CATEGORICAL_FIELDS
+    from database.models import AGENT_CATEGORICAL_FIELDS
+
+    assert {k: set(v) for k, v in AGENT_CATEGORICAL_FIELDS.items()} == CATEGORICAL_FIELDS
 
 
 def test_save_failed_agent_analysis_stores_status_and_error_with_null_fields(session):
     """Milestone 10.5 fix: a failed analysis is a real row, not just an
     audit_events entry -- status FAILED, the real reason, and every
-    qualitative field null (never a fabricated placeholder)."""
+    qualitative field null (never a fabricated placeholder), including
+    the five categorical fields (Milestone 10.5 fix 2)."""
     run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
 
     analysis = crud.add_failed_agent_analysis(
@@ -253,6 +366,11 @@ def test_save_failed_agent_analysis_stores_status_and_error_with_null_fields(ses
     assert analysis.structure_assessment is None
     assert analysis.setup_assessment is None
     assert analysis.uncertainty is None
+    assert analysis.trend_direction is None
+    assert analysis.trend_quality is None
+    assert analysis.structure_quality is None
+    assert analysis.setup_quality is None
+    assert analysis.context_risk is None
 
 
 def test_save_evaluation_computes_total_score(session):
@@ -522,6 +640,11 @@ def test_run_relationships_reach_all_child_records(session):
         structure_assessment="equal highs and lows",
         setup_assessment="no clear setup",
         uncertainty="high",
+        trend_direction="SIDEWAYS",
+        trend_quality="WEAK",
+        structure_quality="MIXED",
+        setup_quality="NONE",
+        context_risk="MODERATE",
     )
     crud.add_evaluation(
         session,

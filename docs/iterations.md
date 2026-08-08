@@ -1099,6 +1099,162 @@ afterward.
 All 188 tests pass (24 database + 25 API + 17 capture + 19 market data +
 25 agent + 32 evaluation + 36 guardrails + 10 orchestrator).
 
+## Milestone 10.5 fix 2 — persist agent categorical observations
+
+Closed the second schema gap flagged (but deliberately not fixed) at the
+end of the Milestone 10.5 fix entry above: `agent_analyses` had no
+columns for the five categorical fields the v2 rubric actually scores
+from (`trend_direction`, `trend_quality`, `structure_quality`,
+`setup_quality`, `context_risk`). The agent produces them and
+`evals/trade_evaluator.py` scores from them, but a completed run only
+ever showed the resulting number -- e.g. `trend_score: 14` -- with no
+stored record of the observation that produced it. That defeats the
+audit trail's whole purpose: a score with no traceable evidence isn't
+actually auditable, it's just a number to trust.
+
+**Schema (`database/models.py`):** `agent_analyses` gained
+`trend_direction`, `trend_quality`, `structure_quality`, `setup_quality`,
+`context_risk` (all nullable `String(20)`) -- populated on `SUCCESS`,
+`null` on `FAILED`, the same pattern as every other qualitative column on
+this table. A new module-level constant, `AGENT_CATEGORICAL_FIELDS`,
+records each field's exact allowed set in one place.
+
+**Enforcement: both database level and application level, deliberately,
+not one or the other:**
+
+- **Database level** — five new `CHECK` constraints on `agent_analyses`
+  (`ck_agent_analyses_trend_direction_allowed`, and one each for the
+  other four fields), each shaped `column IS NULL OR column IN (...)`,
+  built from `AGENT_CATEGORICAL_FIELDS` so the allowed values are written
+  down exactly once. This is the backstop for any future code that
+  constructs `AgentAnalysis(...)` directly, bypassing `crud.py` entirely
+  -- the same reason the `evaluations` table already has a `CHECK`
+  constraint of its own.
+- **Application level** — `database/crud.py`'s new
+  `_validate_categorical_fields()` helper runs inside
+  `add_agent_analysis()` before anything is written, raising `ValueError`
+  with the actual bad value and its allowed set. This exists *in
+  addition to* the database check, not instead of it, for the same
+  reason `add_evaluation()`'s own total-score computation exists
+  alongside the `evaluations` `CHECK` constraint: a Python exception
+  naming the actual problem is a far better failure than a generic
+  SQLite `IntegrityError` for the normal case, while the database
+  constraint is what actually guarantees the invariant can never be
+  violated no matter what code path writes the row. In the real pipeline
+  this basically never fires either way, since `agents/trade_agent.py`'s
+  own `_parse_response()` already rejects an out-of-set value before an
+  analysis is ever accepted as `SUCCESS` -- but that check lives in a
+  different module, for a different purpose (rejecting a bad *model
+  response*), and this task asked for a check at the *write* boundary
+  specifically, so both layers of this codebase's existing defense-in-
+  depth pattern apply here too.
+
+**A real design decision about where the allowed-values live:**
+`AGENT_CATEGORICAL_FIELDS` in `database/models.py` is a deliberate
+*duplicate* of `agents.trade_agent.CATEGORICAL_FIELDS`, not an import of
+it. `database/` has been a leaf module with zero dependencies on
+`agents/`, `capture/`, `tools/`, or `evals/` since Milestone 3 --
+everything else depends on it, never the other way around, and only
+`backend/orchestrator.py` ties the layers together. Importing
+`agents.trade_agent` into `database/models.py` would have been the
+smaller diff, but it would invert that dependency direction for a
+persistence-layer file that has no other reason to know the agent module
+exists. Duplication has an obvious cost (the two lists can drift), so a
+dedicated test
+(`test_agent_categorical_allowed_values_match_the_agent_layer`) asserts
+the two are identical every time the suite runs -- if a category is ever
+added to one and not the other, that test fails immediately rather than
+the drift being discovered later as a confusing rejection.
+
+**`database/crud.py`:** `add_agent_analysis()`'s five new parameters are
+required, not optional/defaulted -- a real `SUCCESS` row from the actual
+pipeline always has all five, and a caller that forgot one should get an
+immediate `TypeError`, not a silently incomplete row (the same reasoning
+`add_evaluation()`'s lack of a `total_score` parameter already
+represents). `add_failed_agent_analysis()` sets all five to `None`
+alongside the other qualitative fields, unchanged in signature.
+
+**`backend/orchestrator.py`:** the one call site,
+`crud.add_agent_analysis(...)` inside `run_pipeline()`, now passes
+`agent_result.trend_direction` / `.trend_quality` / `.structure_quality`
+/ `.setup_quality` / `.context_risk` straight through from the
+`AgentAnalysisResult` the agent already returned -- no new logic, just
+five more fields threaded through a call that already existed.
+
+**`backend/schemas.py`:** `AgentAnalysisOut` gained the same five fields
+(`Optional[str]`), so `GET /runs/{run_id}` returns them alongside the
+prose and the component scores.
+
+- `tests/test_database.py` — 4 tests added: `test_save_agent_analysis`
+  (pre-existing) extended to pass and assert all five categorical fields;
+  a new round-trip test confirming they survive a real commit + refresh;
+  an application-level rejection test (`ValueError` from
+  `add_agent_analysis()` on an out-of-set value, and confirmation nothing
+  was written); a database-level rejection test (direct
+  `models.AgentAnalysis(...)` construction bypassing `crud.py`,
+  `IntegrityError` from the `CHECK` constraint); and the drift-guard test
+  described above. `test_run_relationships_reach_all_child_records`
+  (pre-existing) updated to pass the five now-required fields.
+- `tests/test_orchestrator.py` — the full-success `GET /runs/{id}` test
+  extended to assert the categorical fields are present and correct
+  (`trend_direction: "UP"`, etc., matching the score they produced); the
+  failed-agent-analysis test extended to assert all five are `null` on a
+  `FAILED` row.
+
+All 192 tests pass (28 database + 25 API + 17 capture + 19 market data +
+25 agent + 32 evaluation + 36 guardrails + 10 orchestrator).
+
+Manually verified end to end without any real API call: recreated
+`database/tradepilot.db`, then ran the real FastAPI app (via
+`TestClient`, pointed at the real dev database file, not an in-memory
+test database) with `backend.orchestrator.TradeAgent` patched to a
+forced-`SUCCESS` stub -- confirmed via `mock_agent.analyze.called ==
+True` that the stub, not a real client, was what actually ran. Created a
+run and analyzed it; `GET /runs/{id}` showed `analyses[0]` with
+`trend_direction: "UP"`, `trend_quality: "STRONG"`,
+`structure_quality: "CLEAN"`, `setup_quality: "ACCEPTABLE"`,
+`context_risk: "LOW"` alongside `evaluations[0]`'s `trend_score: 14`,
+`structure_score: 14`, `entry_score: 14`, `timing_context_score: 14`,
+`total_score: 76` -- every component score now traces directly to the
+categorical observation that produced it (MEDIUM uncertainty caps each
+subjective component's raw score at 14; `STRONG`/`CLEAN` both score 20
+raw, `ACCEPTABLE` scores 15 raw, `LOW` scores 20 raw -- all four capped
+down to 14, exactly matching `docs/rubric.md`'s worked example). Dev
+database reset to empty afterward.
+
+**A schema audit was requested alongside this fix, across all eight
+tables, comparing what the pipeline's own dataclasses (`CaptureResult`,
+`MarketQuote`, `AgentAnalysisResult`, `EvaluationResult`,
+`GuardrailCheck`) actually produce against what each table can store.
+Reported, not fixed, per the instruction:**
+
+- **`market_data` has no `mode` column.** `Capture` stores
+  `capture_mode` (`"LIVE"`/`"DEMO"`) directly, but `MarketData` has no
+  equivalent -- `MarketQuote.mode` is never persisted. In practice a
+  reader can usually infer it from `source` (`"demo_fixture"` vs.
+  `"alpha_vantage"`), but that's an indirect inference from a string
+  that happens to be mode-specific today, not a structural guarantee the
+  way `capture_mode` is. Asymmetric with `captures`, which is the more
+  suspicious half of this finding.
+- **`evaluations` has no `risk_reward_ratio` column.** The banded score
+  (`risk_reward_score`: 0/10/20) is stored, but the raw ratio behind it
+  (e.g. `2.0`) is not -- `evals/trade_evaluator.py`'s own docstring
+  documents this as deliberate ("not a database column; it never gets
+  stored, only returned here"), so it's a *known* omission, not an
+  oversight, but it's arguably the same category of gap this fix just
+  closed for the other four components: `risk_reward_score: 20` is
+  exactly as untraceable to its evidence (the actual ratio, and how far
+  above the 2.0 threshold it was) as `trend_score: 14` was before this
+  fix.
+
+No other gap was found across `runs`, `captures`, `guardrail_results`,
+`human_reviews`, or `audit_events` -- each stores every field its
+corresponding pipeline dataclass (or, for `runs`/`human_reviews`, its
+corresponding request schema) produces. `RunDetail.guardrail_outcome`
+being computed rather than stored is a separate, already-documented,
+deliberate design choice (Milestone 10's architecture notes), not a gap
+of this kind.
+
 ## Rebuilding the database
 
 `init_db()` only ever adds tables that don't exist yet — it never alters

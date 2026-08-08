@@ -88,6 +88,13 @@ class AgentAnalysisOut(BaseModel):
     directly on the record -- a client no longer has to infer it from the
     audit trail. The qualitative fields are Optional because a FAILED row
     has every one of them set to null, never a fabricated placeholder.
+
+    Milestone 10.5 fix 2: trend_direction/trend_quality/structure_quality/
+    setup_quality/context_risk are the exact categorical fields
+    evals/trade_evaluator.py scored from -- exposed here so a client can
+    trace trend_score/structure_score/entry_score/timing_context_score
+    (on EvaluationOut below) back to the actual observation behind each
+    one, not just see the number.
     """
 
     model_config = ConfigDict(from_attributes=True)
@@ -99,6 +106,11 @@ class AgentAnalysisOut(BaseModel):
     structure_assessment: Optional[str]
     setup_assessment: Optional[str]
     uncertainty: Optional[str]
+    trend_direction: Optional[str]
+    trend_quality: Optional[str]
+    structure_quality: Optional[str]
+    setup_quality: Optional[str]
+    context_risk: Optional[str]
     error_message: Optional[str]
     timestamp: datetime
 

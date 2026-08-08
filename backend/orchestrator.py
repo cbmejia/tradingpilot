@@ -261,6 +261,11 @@ def run_pipeline(session: Session, run_id: str) -> Run:
                 structure_assessment=agent_result.structure_assessment,
                 setup_assessment=agent_result.setup_assessment,
                 uncertainty=agent_result.uncertainty,
+                trend_direction=agent_result.trend_direction,
+                trend_quality=agent_result.trend_quality,
+                structure_quality=agent_result.structure_quality,
+                setup_quality=agent_result.setup_quality,
+                context_risk=agent_result.context_risk,
             )
         else:
             crud.add_failed_agent_analysis(

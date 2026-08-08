@@ -8,13 +8,14 @@ the root [README.md](../README.md).
 
 ## 1. Current state
 
-- **Milestones 1–10.5 are complete**, including the Milestone 10.5 fix
-  (failure states on analysis/evaluation records). Milestone 11 (UI,
+- **Milestones 1–10.5 are complete**, including both Milestone 10.5
+  follow-up fixes (failure states on analysis/evaluation records, then
+  persisting the agent's categorical observations). Milestone 11 (UI,
   including the Tailwind migration) is next. Milestone 12 (testing) is
   after that.
-- **Latest commit:** "Milestone 10.5 fix - failure states on analysis and
-  evaluation records".
-- **Test count:** 188 tests, all passing (24 database + 25 API + 17
+- **Latest commit:** "Milestone 10.5 fix 2 - persist agent categorical
+  observations".
+- **Test count:** 192 tests, all passing (28 database + 25 API + 17
   capture + 19 market data + 25 agent + 32 evaluation + 36 guardrails +
   10 orchestrator). See the roadmap checklist at the bottom of
   [docs/iterations.md](iterations.md) for the full milestone list.
@@ -29,11 +30,26 @@ the root [README.md](../README.md).
 - **`agent_analyses` and `evaluations` now carry `status`/
   `error_message`**, matching `captures`/`market_data`, and a `FAILED`
   row is a real row (never zeros, never a fabricated string) rather than
-  something only visible in `audit_events`. This was a real gap flagged
-  in Milestone 10.5 and closed immediately after, before any UI got
-  built against the old shape — see that entry and the "Milestone 10.5
-  fix" entry in [docs/iterations.md](iterations.md) for the exact schema
-  and the adapted `CHECK` constraint.
+  something only visible in `audit_events`.
+- **`agent_analyses` also now stores the five categorical fields**
+  (`trend_direction`, `trend_quality`, `structure_quality`,
+  `setup_quality`, `context_risk`) the v2 rubric actually scores from —
+  so a completed run's component scores (e.g. `trend_score: 14`) can be
+  traced back to the observation that produced them, not just trusted as
+  a number. Enforced both at the database level (a `CHECK` constraint
+  per field) and the application level (`database/crud.py` validates
+  before writing) — see the "Milestone 10.5 fix" and "Milestone 10.5 fix
+  2" entries in [docs/iterations.md](iterations.md) for the full
+  reasoning on both this and the status/error_message fix.
+- **A schema audit across all eight tables was done as part of fix 2** —
+  two gaps were found and reported, neither fixed yet: `market_data` has
+  no `mode` (LIVE/DEMO) column of its own (only inferable indirectly via
+  `source`), and `evaluations` has no `risk_reward_ratio` column (the raw
+  ratio behind `risk_reward_score`, documented as deliberate in
+  `evals/trade_evaluator.py` but arguably the same kind of traceability
+  gap this fix just closed elsewhere). See the end of the "Milestone
+  10.5 fix 2" entry in [docs/iterations.md](iterations.md) for the full
+  audit.
 - See "How to run everything" below for the exact request sequence to
   exercise the pipeline by hand.
 
@@ -166,16 +182,14 @@ standalone tool:
   to avoid churning the shell twice. The orchestrator this milestone
   needs (Milestone 10.5) is already done.
 - **Milestone 12 — Testing.** What this covers beyond the substantial
-  unit-test suite that already exists (188 tests across every backend
+  unit-test suite that already exists (192 tests across every backend
   module, including the orchestrator) isn't yet decided — likely
   candidates are frontend tests and an end-to-end pass, but that should
   be scoped as its own milestone discussion, not assumed here.
-- **A known, still-open gap** (out of scope for the Milestone 10.5 fix,
-  which only closed the status/error-message gap): `agent_analyses` has
-  no columns for the five categorical fields the agent produces
-  (`trend_direction`, `trend_quality`, `structure_quality`,
-  `setup_quality`, `context_risk`) — a gap from the Milestone 8 revision.
-  A successful analysis's audit-event text is currently the only place
-  those five values are visible after the fact. Worth a small,
-  independent fix at some point — see the "Milestone 10.5 fix" entry in
+- **Two known, still-open schema gaps** (reported, not fixed, during
+  Milestone 10.5 fix 2's full eight-table audit): `market_data` has no
+  `mode` (LIVE/DEMO) column of its own; `evaluations` has no
+  `risk_reward_ratio` column for the raw number behind
+  `risk_reward_score`. Neither blocks Milestone 11. See the audit at the
+  end of the "Milestone 10.5 fix 2" entry in
   [docs/iterations.md](iterations.md).
