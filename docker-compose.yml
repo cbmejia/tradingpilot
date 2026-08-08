@@ -1,0 +1,6 @@
+# TradePilot AI — docker-compose.
+# Placeholder only. Services (backend, frontend, database) will be defined
+# once the corresponding application code exists.
+version: "3.9"
+
+services: {}

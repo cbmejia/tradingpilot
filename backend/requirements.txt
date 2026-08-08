@@ -1,0 +1,2 @@
+# TradePilot AI — Python backend dependencies.
+# Populated incrementally as functionality is built. No packages pinned yet.
