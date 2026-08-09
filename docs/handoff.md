@@ -20,12 +20,16 @@ duplicates: [docs/architecture.md](architecture.md),
   [docs/iterations.md](iterations.md) for the full diagnosis and fix —
   it deliberately added no retry-on-truncation logic and no partial-JSON
   recovery; a malformed response is still a `FAILED` analysis.
-- **Latest commit:** `585f625` "chore: dry run sweep script for demo
-  prep" (an operational script, `dry-run.ps1`, not a milestone or an
-  iteration — no doc entry needed for it).
-- **7A Iteration 1 is complete, including the UI and live verification.**
-  Agent-proposed trade levels (`agent_proposals` table, coherence checking
-  in `backend/orchestrator.py` reusing `evals/trade_evaluator.py`'s
+- **Latest committed and pushed state:** `a7c085c` "docs: record the
+  proposed-RR variation finding and confirm chart_variant is inert in
+  LIVE mode" — a docs-only follow-up to the Iteration 1 commit. Both
+  `b869f07` (the Iteration 1 UI/live-verification/fixture commit, tagged
+  `7a-iteration-1`) and `a7c085c` are pushed; `origin/7a-iterations`
+  points at `a7c085c`.
+- **7A Iteration 1 is complete, tagged `7a-iteration-1` at `b869f07`
+  (pushed), including the UI and live verification.** Agent-proposed
+  trade levels (`agent_proposals` table, coherence checking in
+  `backend/orchestrator.py` reusing `evals/trade_evaluator.py`'s
   `compute_risk_reward()`, `POST /runs/{run_id}/accept-proposal`) are
   built, tested, and verified against a **real Claude call** — not just a
   hand-seeded DEMO row. See `## 7A Iteration 1 — agent-proposed trade
@@ -44,25 +48,48 @@ duplicates: [docs/architecture.md](architecture.md),
   accept-and-navigate flow, all built and tested — **nothing about the UI
   is deferred anymore.**
 - **7A Iteration 2 (multi-timeframe capture + cross-timeframe agreement
-  guardrail) has not started.** Awaiting a go-ahead per the "one iteration
-  at a time" working agreement below. Iterations 3–4 haven't been
-  designed at all yet.
-- **Test counts as of 7A Iteration 1 (last real run):** 292 backend tests
-  + 44 frontend tests, all passing. Backend: 46 database + 32 API + 25
-  capture + 26 market data + 53 agent + 34 evaluation + 36 guardrails +
-  26 orchestrator + 14 failure scenarios. These will grow once 7A
-  Iteration 2 lands — treat this count as stale the moment more 7A code
-  exists.
-- **Alpha Vantage's free-tier daily quota (25 requests) is exhausted as
-  of this session** — hit partway through a 5-request LIVE sweep
-  (`dry-run.ps1`). No visibility into the exact remaining count or reset
-  time beyond the API's own error text; check the Alpha Vantage account
-  dashboard before spending more LIVE market-data calls. `.env` has been
-  restored to `CAPTURE_MODE=demo`/`MARKET_DATA_MODE=demo`. The new
-  `demo_chart_variant=readable_chart` DEMO path (see above) covers
-  everything the proposal feature needs to demonstrate without spending
-  any more LIVE calls — save remaining quota for an actual LIVE segment
-  if one gets recorded, not for further verification.
+  guardrail) is approved, with three required changes, and is partway
+  built.** See "The 7A plan" below for the full approved scope. **As of
+  this doc update, the backend exists only in an uncommitted working
+  tree** — schema/migration, the confirmation agent call, orchestrator
+  wiring, the twelfth guardrail, and 335 passing backend tests are done;
+  the frontend UI, the `docs/iterations.md` entry, the commit, and the
+  `7a-iteration-2` tag are still outstanding, and one fixture-verification
+  question is still unresolved (see below). **A fresh session should run
+  `pytest` from the repo root first** to see whether that uncommitted
+  work is still present before assuming Iteration 2 hasn't started — do
+  not re-implement what's already there.
+- **The four evidence runs — do not delete, do not reset the dev
+  database.** Preserved in `database/tradepilot.db` (not committed —
+  gitignored, as always) specifically because they're the only record
+  behind two Iteration 1 findings: the proposed-RR-varies-with-context
+  observation and the leak-path proof (agent proposal math never reaching
+  the run's own score). Full detail in
+  [docs/iterations.md](iterations.md)'s Iteration 1 addendum and the RR
+  finding entry — not repeated here, just identified so nothing gets
+  reset by accident:
+  - `80da6bc6...` — DEMO abstract fixture, no user levels, agent declined.
+  - `832f6885...` — DEMO abstract fixture, user levels supplied, agent declined.
+  - `ed4e50b2...` — LIVE EURUSD 4h, user levels `RR=2.0`, agent's own
+    proposal (different numbers) also came out to `RR=2.0`.
+  - `cd25a285...` — hybrid (LIVE capture + real Claude call + DEMO
+    quote), no user levels, agent proposed `RR≈1.83`; the run's own
+    `evaluations.risk_reward_ratio` and `risk_reward_score` are both
+    `NULL` — the leak-path proof, live.
+- **Test counts:** 292 backend + 44 frontend as of the last **committed**
+  state (`a7c085c`). The uncommitted Iteration 2 backend work brings the
+  backend suite to 335 locally — not yet reflected in a commit or in
+  `docs/iterations.md`; treat both counts as provisional until Iteration
+  2 actually lands.
+- **Alpha Vantage's free-tier daily quota (25 requests) was exhausted
+  during Iteration 1's live verification** and its status is still
+  unknown — no visibility into the exact remaining count or reset time
+  beyond the API's own error text; check the Alpha Vantage account
+  dashboard before spending more LIVE market-data calls. `.env` is
+  restored to `CAPTURE_MODE=demo`/`MARKET_DATA_MODE=demo`. **The
+  recording needs zero LIVE calls**: `demo_chart_variant=readable_chart`
+  reproduces the full proposal flow deterministically in DEMO mode — see
+  above.
 
 ## 2. The 7A plan
 
@@ -89,7 +116,95 @@ milestones.
    correctly declined; see docs/iterations.md's addendum for the full
    live-run evidence). Tagged `7a-iteration-1`.
 2. **Iteration 2 — multi-timeframe capture + cross-timeframe agreement
-   guardrail.** Not yet designed.
+   guardrail.** Design approved. **Status: backend implemented in an
+   uncommitted working tree (335 backend tests passing at the time of
+   this doc update) — frontend UI, the `docs/iterations.md` entry,
+   commit, and the `7a-iteration-2` tag are still outstanding.** Every
+   6C and 7A Iteration 1 invariant (section 4 below) is unchanged by this
+   scope — confirmed structurally (no new scoring path, guardrails still
+   only ever downgrade, no new fallback logic), not just asserted.
+
+   **Approved scope:**
+   - Two timeframes via a fixed ladder
+     (`1m→5m→15m→30m→1h→4h→1d→1w`) — the confirmation timeframe is
+     always the next rung up the primary. Top of the ladder means no
+     confirmation timeframe exists at all — N/A, not a failure.
+   - `Capture.timeframe_role` (`"PRIMARY"`/`"CONFIRMATION"`) distinguishes
+     a run's up-to-two captures; no new table needed for that part (a new
+     `confirmation_analyses` table *was* added, for the confirmation
+     call's own result, analogous to `agent_analyses`).
+   - Agreement is derived by the orchestrator, never stated by the
+     agent — the confirmation call only ever reports its own
+     `trend_direction`/`trend_quality` for the confirmation chart;
+     `guardrails/rules.py` decides whether that agrees with the primary
+     read. Fails closed (never reports agreement) whenever it genuinely
+     can't be confirmed: either side `SIDEWAYS`/`UNCLEAR`, a failed
+     confirmation capture, or a failed confirmation analysis.
+   - A twelfth guardrail, `CROSS_TIMEFRAME_AGREEMENT`, in
+     `REVIEW_FORCING_RULES` — review-forcing, never blocking, the same
+     category as `UNCERTAINTY_ACCEPTABLE`/`SYNTHETIC_DATA`.
+   - `evals/trade_evaluator.py` is untouched — the two new confirmation
+     fields are never scored, only ever read by the new guardrail.
+   - No proposal-specific wiring — accepting a proposal (Iteration 1)
+     works exactly as before.
+   - **The UI is being built this iteration, not deferred** — a
+     deliberate correction from how Iteration 1 initially treated its
+     own UI before that was pushed back on.
+
+   **Three required changes to the design, given explicitly before
+   implementation started:**
+   1. **Two separate agent calls, one image each — never one call with
+      two images.** `TradeAgent.analyze()` (primary) stays byte-identical
+      to the single-timeframe path — proven by a dedicated test
+      comparing its exact prompt text and image-block count.
+      `analyze_confirmation()` is a second, independent Claude call with
+      its own minimal prompt, returning only
+      `confirmation_visible_timeframe`/`confirmation_trend_direction`/
+      `confirmation_trend_quality`. Reason: Iteration 1's own live-run
+      evidence showed agent output varies with what it's shown (see the
+      evidence runs above) — conditioning the primary's five *scored*
+      categories on a second image would silently change what those
+      categories mean, breaking 6C comparability and Iteration 4's
+      reproducibility baseline before it's even built.
+      `MarketDataManager.get_quote()` stays at exactly one call per run
+      (Alpha Vantage is the constrained resource here, not Anthropic) —
+      also proven by a dedicated test.
+   2. **Detect an identical confirmation capture.** A SHA-256 hash
+      comparison of both capture images, computed in the orchestrator
+      (not `guardrails/rules.py`, which stays a pure function over
+      explicit inputs, the same principle `CAPTURE_FRESH`/
+      `MARKET_DATA_FRESH` already apply to `now`) — an identical hash
+      means the TradingView timeframe switch may not have taken effect,
+      and `CROSS_TIMEFRAME_AGREEMENT` fails closed. Separately, the
+      confirmation call echoes back the timeframe label it can actually
+      read off the chart; the orchestrator compares it
+      (case/whitespace-insensitive) against the timeframe it actually
+      requested — a mismatch is also treated as a failed confirmation
+      capture. Both proven with dedicated tests, including one that
+      feeds the identical image to both capture calls and confirms the
+      run does not report agreement.
+   3. **The migration must not destroy the evidence runs.**
+      `Capture.timeframe_role` was added to the real dev database via a
+      raw `ALTER TABLE` against the live file (backed up first as
+      `database/tradepilot.db.pre-iteration2-backup`), **not** the usual
+      delete-and-recreate — existing rows were explicitly backfilled to
+      `"PRIMARY"`. All four evidence runs above were re-queried through
+      the ORM immediately after the migration, and again after every
+      subsequent schema change, and confirmed to still have their
+      proposals and evaluations intact throughout.
+
+   **Also required before committing the new DEMO fixture, not yet
+   resolved:** verify that a fresh `EURUSD_1h_readable` capture actually
+   agrees with the already-committed `EURUSD_4h_readable.png` rather than
+   assuming it — the same "verify, don't assume" lesson as the original
+   abstract-fixture finding. **Done once, inconclusive:** a fresh LIVE
+   1h capture came back `trend_direction=UNCLEAR` against the existing 4h
+   fixture — fail-closed, neither agreement nor disagreement, plausibly a
+   real closed-weekend-market artifact rather than a bug. Not yet
+   decided: retry the capture, keep this result as the (also legitimate)
+   fail-closed demo path, or try a different symbol/timeframe pair. A
+   fresh session should ask before committing any `EURUSD_1h_readable.png`
+   fixture rather than assuming an answer.
 3. **Iteration 3 — economic calendar tool + event-proximity block.**
    Wires up `tools/economic_calendar.py` — scaffolded since the early
    milestones, mentioned in [docs/architecture.md](architecture.md) as
