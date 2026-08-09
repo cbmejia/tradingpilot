@@ -450,6 +450,7 @@ def _seed_capture(client, run_id: str, **overrides) -> None:
 
     defaults = dict(
         capture_mode=CaptureMode.DEMO.value,
+        timeframe_role="PRIMARY",
         symbol="EURUSD",
         timeframe="1h",
         status=CaptureStatus.SUCCESS.value,
@@ -556,3 +557,67 @@ def test_screenshot_endpoint_accepts_no_client_supplied_path_or_filename(client)
 
     assert plain.status_code == with_query_tricks.status_code == 200
     assert plain.content == with_query_tricks.content
+
+
+# --- 7A Iteration 2: role=PRIMARY|CONFIRMATION on the screenshot endpoint ---
+
+
+def test_screenshot_endpoint_role_defaults_to_primary(client):
+    """No role param at all reproduces the exact pre-Iteration-2 response
+    -- confirmed by comparing byte-for-byte against an explicit
+    role=PRIMARY request."""
+    from capture.demo_provider import DemoProvider
+
+    created = client.post("/runs", json=VALID_RUN_PAYLOAD).json()
+    real_capture = DemoProvider().capture("EURUSD", "1h")
+    _seed_capture(client, created["id"], screenshot_path=real_capture.screenshot_path)
+
+    no_role = client.get(f"/runs/{created['id']}/screenshot")
+    explicit_primary = client.get(f"/runs/{created['id']}/screenshot", params={"role": "PRIMARY"})
+
+    assert no_role.status_code == explicit_primary.status_code == 200
+    assert no_role.content == explicit_primary.content
+
+
+def test_screenshot_endpoint_role_confirmation_serves_the_confirmation_capture(client):
+    from capture.demo_provider import DemoProvider
+
+    created = client.post("/runs", json=VALID_RUN_PAYLOAD).json()
+    primary_capture = DemoProvider().capture("EURUSD", "1h")
+    confirmation_capture = DemoProvider().capture("GBPUSD", "4h")  # a different, real fixture file
+    _seed_capture(client, created["id"], screenshot_path=primary_capture.screenshot_path)
+    _seed_capture(
+        client,
+        created["id"],
+        timeframe_role="CONFIRMATION",
+        symbol="GBPUSD",
+        timeframe="4h",
+        screenshot_path=confirmation_capture.screenshot_path,
+    )
+
+    primary_response = client.get(f"/runs/{created['id']}/screenshot", params={"role": "PRIMARY"})
+    confirmation_response = client.get(
+        f"/runs/{created['id']}/screenshot", params={"role": "CONFIRMATION"}
+    )
+
+    assert primary_response.status_code == confirmation_response.status_code == 200
+    assert primary_response.content != confirmation_response.content
+
+
+def test_screenshot_endpoint_role_confirmation_404s_when_no_confirmation_capture_exists(client):
+    created = client.post("/runs", json=VALID_RUN_PAYLOAD).json()
+    _seed_capture(client, created["id"])  # PRIMARY only
+
+    response = client.get(f"/runs/{created['id']}/screenshot", params={"role": "CONFIRMATION"})
+
+    assert response.status_code == 404
+    assert "confirmation" in response.json()["detail"].lower()
+
+
+def test_screenshot_endpoint_rejects_an_unrecognized_role(client):
+    created = client.post("/runs", json=VALID_RUN_PAYLOAD).json()
+    _seed_capture(client, created["id"])
+
+    response = client.get(f"/runs/{created['id']}/screenshot", params={"role": "not_a_real_role"})
+
+    assert response.status_code == 422

@@ -43,6 +43,7 @@ function demoRun(overrides: Partial<RunDetail> = {}): RunDetail {
       {
         id: 1,
         capture_mode: "DEMO",
+        timeframe_role: "PRIMARY",
         symbol: "EURUSD",
         timeframe: "1h",
         screenshot_path: "screenshots/demo/EURUSD_1h.png",
@@ -103,6 +104,7 @@ function demoRun(overrides: Partial<RunDetail> = {}): RunDetail {
     audit_events: [],
     guardrail_outcome: "REQUIRES_REVIEW",
     proposal: null,
+    confirmation_analysis: null,
     ...overrides,
   };
 }
@@ -158,6 +160,7 @@ describe("App", () => {
         {
           id: 1,
           capture_mode: "DEMO",
+          timeframe_role: "PRIMARY",
           symbol: "EURUSD",
           timeframe: "1h",
           screenshot_path: null,
@@ -208,6 +211,7 @@ describe("App", () => {
         {
           id: 1,
           capture_mode: "DEMO",
+          timeframe_role: "PRIMARY",
           symbol: "EURUSD",
           timeframe: "1h",
           screenshot_path: null,

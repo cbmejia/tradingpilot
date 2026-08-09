@@ -2588,6 +2588,404 @@ the only genuinely LIVE-dependent segment left, and it isn't specific to
 7A: Milestone 12's own final review already named LIVE-mode mileage as
 this project's second-weakest area, before 7A existed.
 
+## 7A Iteration 2 — multi-timeframe capture + cross-timeframe agreement guardrail
+
+The second 7A iteration. Design approved before any code was written; full
+scope and the three required changes given at approval time are recorded
+in "The 7A plan" in [docs/handoff.md](handoff.md) and not repeated here in
+full — this entry is the build log: what was actually built, how each
+required change was proven, and the evidence.
+
+**The tension this iteration exists to resolve.** A single-timeframe read
+has no way to distinguish "a real trend" from "noise that happens to look
+like a trend on this one chart." A second, higher-timeframe read is
+classic discretionary-trading practice for exactly that reason — but only
+if it's a genuinely independent observation. Folding a second image into
+the same Claude call the five *scored* categorical fields already come
+from would let the model's read of one timeframe quietly influence its
+read of the other, changing what those five fields mean without changing
+their names — breaking 6C's own comparability and Iteration 4's
+reproducibility baseline before either is even measured. So the
+confirmation read has to be structurally incapable of touching the
+primary read, and "agreement" has to be a fact the orchestrator computes,
+never a claim the model is trusted to make about itself.
+
+**Every 6C and 7A Iteration 1 invariant is unchanged, confirmed
+structurally, not just asserted:**
+
+- No new scoring path. `evals/trade_evaluator.py` was not touched.
+  `test_evaluate_signature_has_no_confirmation_parameter` inspects
+  `evaluate()`'s own signature (two parameters, neither confirmation-
+  shaped); `test_evaluator_never_reads_confirmation_analysis_attributes`
+  greps its source for every confirmation-call identifier and finds zero
+  matches — the same source-grep style Iteration 1's
+  `test_evaluator_never_reads_proposal_attributes` already established
+  for the proposal fields.
+- Guardrails still only ever downgrade. `CROSS_TIMEFRAME_AGREEMENT` is
+  the twelfth rule, added to `REVIEW_FORCING_RULES` — the same category
+  as `UNCERTAINTY_ACCEPTABLE`/`SYNTHETIC_DATA`/`SCORE_THRESHOLD`, never
+  `BLOCKING_RULES`. A total disagreement forces `REQUIRES_REVIEW`, never
+  `BLOCKED` — confirmed directly by
+  `test_cross_timeframe_agreement_is_a_review_forcing_rule_not_blocking`.
+- No new fallback logic. `capture/manager.py`'s `CaptureManager` and
+  `tools/market_data.py`'s `MarketDataManager` are both unchanged; the
+  confirmation capture goes through the identical `CaptureManager.capture()`
+  call the primary capture already used, just a second time with a
+  different timeframe. `MarketDataManager.get_quote()` is still called
+  exactly once per run — proven by a dedicated orchestrator test
+  (`test_market_data_get_quote_is_called_exactly_once_even_with_a_confirmation_capture`),
+  since Alpha Vantage's daily quota, not Anthropic's, is this project's
+  actual constrained resource.
+
+### Schema and the migration
+
+`Capture.timeframe_role` (`"PRIMARY"` | `"CONFIRMATION"`, `database/models.py`)
+distinguishes a run's up to two captures — required, never defaulted, with
+a `CHECK` constraint restricting it to those two values. A new
+`confirmation_analyses` table (analogous to `agent_analyses`, but for the
+confirmation call's own result: `visible_timeframe`/`trend_direction`/
+`trend_quality`, `SUCCESS`/`FAILED` status, the identical shape every
+other pipeline-stage table already uses) was added without prior sign-off
+during the build — flagged explicitly and accepted afterward as the right
+design, since it follows the exact same "own table, never merged into
+what the evaluator reads" pattern `agent_proposals` already established
+for the same reason.
+
+The migration ran against the **live dev database**, via a raw
+`ALTER TABLE` (not the usual delete-and-recreate), specifically because
+`database/tradepilot.db` held the only record of two real findings from
+Iteration 1 (the proposed-RR-varies-with-context observation and the
+leak-path proof). `database/tradepilot.db.pre-iteration2-backup` was
+taken first. Existing `Capture` rows were backfilled to `"PRIMARY"`. All
+four evidence runs (`80da6bc6...`, `832f6885...`, `ed4e50b2...`,
+`cd25a285...`) were re-queried through the ORM immediately after the
+migration, again after every subsequent schema change, and again after
+every batch of manual/live verification runs performed for this
+iteration — confirmed intact every time, never reset.
+
+### The three required changes, and how each was proven
+
+1. **Two separate Claude calls, one image each.**
+   `agents/trade_agent.py`'s `TradeAgent.analyze_confirmation()` is
+   independent of `analyze()` — its own prompt files
+   (`prompts/confirmation_system_prompt.md`,
+   `prompts/confirmation_analysis_prompt.md`), its own tiny expected-field
+   set (`confirmation_visible_timeframe`/`confirmation_trend_direction`/
+   `confirmation_trend_quality`, deliberately disjoint from `analyze()`'s
+   `EXPECTED_FIELDS`), and its own `CONFIRMATION_DEFAULT_MAX_TOKENS=256`
+   (analyze()'s response shape is much larger and needs a much larger
+   budget; reusing one constant for both would have been wrong for one of
+   them). `_reject_suspicious_extra_fields()` — the numeric/score-keyword
+   rejection Iteration 1 built for `analyze()` — is factored out and
+   reused by both parsers, so the hard boundary can't drift between the
+   two response shapes.
+   `test_primary_call_payload_is_unchanged_by_the_existence_of_analyze_confirmation`
+   compares `analyze()`'s exact prompt text and image-block count against
+   its pre-Iteration-2 shape byte for byte.
+2. **Identical confirmation capture, detected.** `backend/orchestrator.py`
+   computes a SHA-256 hash of both capture files right after capturing
+   them (`_hash_file()`) and passes the boolean comparison into
+   `guardrails/rules.py` as an explicit parameter
+   (`confirmation_capture_matches_primary_hash`) — `guardrails/rules.py`
+   itself stays a pure function over explicit inputs, the same "no
+   ambient state" principle `CAPTURE_FRESH`/`MARKET_DATA_FRESH` already
+   apply to `now`. Separately, the confirmation call echoes back whatever
+   timeframe label it can actually read off the chart
+   (`confirmation_visible_timeframe`); the orchestrator never trusts the
+   confirmation timeframe it *requested* without also checking what the
+   model actually *saw* — a case/whitespace-insensitive mismatch is
+   treated as a failed confirmation. Both proven directly:
+   `test_confirmation_capture_identical_hash_is_detected` and
+   `test_confirmation_timeframe_echo_mismatch_is_detected` in
+   `tests/test_orchestrator.py`, each feeding a real byte-identical or
+   mismatched pair through the real orchestrator and confirming the run
+   does not report agreement.
+3. **The migration didn't destroy the evidence runs.** Covered above.
+
+### The twelfth guardrail, and its reason-text taxonomy
+
+`guardrails/rules.py`'s `_cross_timeframe_agreement()` fails closed in
+every case agreement genuinely can't be confirmed, and passes in exactly
+two structurally different N/A cases. A first pass at the reason text
+collapsed two real failure causes into one ambiguous string
+(`"Primary trend (UNCLEAR) and/or confirmation trend (UP) is not
+directional"`) — impossible to tell which side actually failed without
+reading raw category values out of the message by hand — and collapsed
+both N/A cases into one generic `"N/A"`, which silently misreported the
+reason for any run where a Milestone 12 `force_scenario` was active as
+"top of the ladder," even when the run's actual timeframe wasn't. Both
+were caught and fixed before this iteration was allowed to be recorded as
+done. Every cause now has its own, non-overlapping reason text — proven
+distinct in one place by
+`test_cross_timeframe_agreement_reason_text_is_distinct_per_cause`:
+
+| Cause | Passes? | Reason text starts with |
+|---|---|---|
+| Primary at top of the ladder | ✓ | `N/A: primary at top of ladder` |
+| `force_scenario` active | ✓ | `N/A: suppressed by force_scenario` |
+| Confirmation capture failed (missing fixture, capture error) | ✕ | `Confirmation capture failed` |
+| Confirmation capture identical to primary (SHA-256 match) | ✕ | `Identical image hash` |
+| Confirmation call's own echoed timeframe doesn't match what was requested | ✕ | `Timeframe echo mismatch` |
+| Confirmation Claude call itself failed | ✕ | `Confirmation analysis did not succeed` |
+| Primary trend is `SIDEWAYS`/`UNCLEAR` | ✕ | `Primary read non-directional` (checked before the confirmation side, since it's the more fundamental problem) |
+| Confirmation trend is `SIDEWAYS`/`UNCLEAR` | ✕ | `Confirmation read non-directional` |
+| Both directional and equal | ✓ | `Primary trend (X) and confirmation trend (X) agree.` |
+| Both directional and different | ✕ | `Primary trend (X) and confirmation trend (Y) disagree.` |
+
+`force_scenario_active` is a new explicit parameter on
+`evaluate_guardrails()`/`_cross_timeframe_agreement()`, set by
+`backend/orchestrator.py` to `force_scenario is not None` — the same
+explicit-boolean-flag pattern `confirmation_capture_matches_primary_hash`
+already established, not a second way of inferring the same fact.
+
+**`force_scenario` never makes an unmocked, billed confirmation call.**
+`backend/orchestrator.py`'s `run_pipeline()` keeps
+`confirmation_timeframe` at `None` whenever `force_scenario` is active,
+for every one of the seven documented scenarios — Milestone 12's testing
+affordance exists so a guardrail can be proven for free and
+deterministically, and `analyze_confirmation()` has no force_scenario
+equivalent of its own. Proven for all seven scenarios in one parametrized
+test,
+`test_force_scenario_never_makes_an_unmocked_confirmation_call_and_reports_suppressed`:
+`analyze_confirmation` is asserted never called even though it's mocked
+and would happily return a value, and `CROSS_TIMEFRAME_AGREEMENT`'s
+reason is confirmed to read `N/A: suppressed by force_scenario` — visible
+in its own distinct text, not an unexplained N/A or a failure-looking
+result.
+
+### Tests, verification, and counts
+
+335 backend tests existed before this session's hardening pass (up from
+Iteration 1's 292) — the schema/migration, `analyze_confirmation()`, the
+orchestrator wiring, and the guardrail rule's core behavior. This
+session's hardening pass (the reason-text taxonomy fix, the
+evaluator-isolation proof, the `SYNTHETIC_DATA` role-independence proof,
+the force_scenario-suppression regression guard, and the
+`role=PRIMARY|CONFIRMATION` screenshot endpoint plus its own tests) added
+16 more: **351 backend tests total** — 71 agent + 36 API + 25 capture +
+56 database + 36 evaluation + 21 failure scenarios + 51 guardrails + 26
+market data + 29 orchestrator. Frontend grew from Iteration 1's 44 to
+**52** — a new `ConfirmationAnalysisPanel` (5 tests) and 3 new
+`ChartCapturePanel` tests for `role` selection.
+
+## 7A Iteration 2 addendum — the readable DEMO path, a categorical-stability finding, and the UI
+
+Everything above was built and unit-tested with hand-built fixtures.
+This addendum is the same live-verification discipline Iteration 1's own
+addendum established — "in 6C, `analysis_text` truncation passed every
+test and only surfaced on a live run" — applied here: what the readable
+DEMO path actually produces against a real Claude call, a real,
+non-obvious finding from measuring it five times, and the UI, all
+verified before this iteration was allowed to move.
+
+### The fixture decision: keep the UNCLEAR capture, don't retry
+
+Iteration 1's `readable_chart` DEMO variant had one committed fixture,
+`EURUSD_4h_readable.png`, used as `PRIMARY`. Under Iteration 2's fixed
+ladder, a `4h` primary needs a `1d` confirmation — no `1d` fixture exists,
+and building one was out of scope. Verifying the readable path needed a
+second rung, so `1h` (whose confirmation, `4h`, already had a fixture)
+was tried instead. A real LIVE capture of `EURUSD 1h`
+(`EURUSD_1h_20260809T135928Z.png`) came back `trend_direction=UNCLEAR`
+when analyzed.
+
+**Decision: keep it. Do not retry.** Recapturing until the read comes back
+agreeable would be selecting a fixture on its outcome — the same move
+already rejected twice for the prompt itself (Iteration 1's addendum:
+"declining was the prompted-for, correct behavior... not a bug to patch
+around by changing the instructions"). A real 1h capture reading
+`UNCLEAR` and a real 4h capture reading a clean uptrend are both honest
+facts about two different charts; neither is more "correct" than the
+other, and picking whichever one flatters the feature would have been
+exactly the wrong lesson from that earlier finding. Fail-closed on a
+genuinely inconclusive read is the guardrail working as designed — the
+stronger thing to demonstrate, not a fallback.
+
+`EURUSD_1h_20260809T135928Z.png` is now committed as
+`screenshots/demo/EURUSD_1h_readable.png`. Its hash differs from the
+primary capture and its echoed timeframe matched `1h` — confirmed a real,
+distinct 1h capture that happened to read `UNCLEAR`, not a failed or
+substituted one.
+
+**Agreement and disagreement are covered by hand-built unit fixtures
+instead** (`tests/test_guardrails.py`'s `_good_confirmation_result()` and
+friends), so neither branch depends on what a live model call happens to
+say on any given day. That leaves all three states — agree, disagree, and
+genuinely inconclusive — with real coverage: the two scored branches from
+hand-built fixtures, and the fail-closed branch from a real, honestly
+inconclusive capture.
+
+### What the readable DEMO path actually produces (both ladder pairings)
+
+Run four ways in DEMO, `readable_chart` variant, real Claude calls, real
+dev database (all preserved):
+
+| | Primary | Confirmation | Confirmation outcome | `CROSS_TIMEFRAME_AGREEMENT` | Final status |
+|---|---|---|---|---|---|
+| No user levels | `4h` (`EURUSD_4h_readable.png`) | `1d` — **no fixture** | capture failed | `Confirmation capture failed: No demo fixture for EURUSD 1d...` | `BLOCKED` (missing trade params) |
+| `LONG 1.150/1.145/1.160` | `4h` | `1d` — no fixture | capture failed | same | `REQUIRES_REVIEW` — failing: `SCORE_THRESHOLD` (59), `SYNTHETIC_DATA`, `CROSS_TIMEFRAME_AGREEMENT` |
+| No user levels | `1h` (`EURUSD_1h_readable.png`) | `4h` (`EURUSD_4h_readable.png`) | SUCCESS | `Primary trend (UP) and confirmation trend (UP) agree.` | `BLOCKED` (missing trade params) |
+| `LONG 1.150/1.145/1.160` | `1h` | `4h` | SUCCESS | agree | `REQUIRES_REVIEW` — failing: `SCORE_THRESHOLD` (45), `SYNTHETIC_DATA` only |
+
+**Recorded, adopted going forward: the `1h`-primary / `4h`-confirmation
+pairing.** It's the only one that exercises both real captures and both
+real Claude calls end to end, and it reuses `EURUSD_4h_readable.png` in a
+second role (confirmation) rather than needing a new fixture.
+
+**The `4h`-primary case is documented, not discarded, and its limitation
+is named plainly:** the readable fixture set only covers two rungs of
+the ladder. A `4h`-primary DEMO run will always show
+`CROSS_TIMEFRAME_AGREEMENT` failing with the specific
+`No demo fixture for EURUSD 1d` reason — that is honest behavior (a real,
+correctly-attributed capture failure, distinct from a generic one), not a
+placeholder standing in for a missing feature. Building a full `1d`
+fixture was out of scope for this iteration.
+
+### Headline finding: identical DEMO input does not guarantee identical categorical output
+
+The same `1h`-primary / `4h`-confirmation DEMO pipeline (fixed fixture
+images, fixed quote, fixed `LONG 1.150/1.145/1.160` trade params, no code
+changes) was run **five times in a row**, purely to measure — not debug —
+whether the agent's categorical read is stable on identical input. Run
+IDs, all preserved in the dev database:
+`c7ab7dd29873425db443da517521a1e1`, `9acb5fcaf9054bcb88ea74a61cb6ad5b`,
+`3a064fbf1eec4011814a9d03a3168b1f`, `74b591cfa93245df8d53bae1630bca49`,
+`75df8200cd004ae48f54d2142018040f`.
+
+| Field | Result across 5 runs |
+|---|---|
+| `trend_direction` | stable — `UP`, all 5 |
+| `trend_quality` | **varied** — `MODERATE` ×4, `WEAK` ×1 |
+| `structure_quality` | stable — `MIXED`, all 5 |
+| `setup_quality` | stable — `MARGINAL`, all 5 |
+| `context_risk` | stable — `MODERATE`, all 5 |
+| `uncertainty` | stable — `MEDIUM`, all 5 |
+| `confirmation_trend_direction` | stable — `UP`, all 5 |
+| `confirmation_trend_quality` | stable — `MODERATE`, all 5 |
+| `total_score` | **varied** — 55 ×4, 45 ×1 (driven entirely by the `trend_quality` flip) |
+| `CROSS_TIMEFRAME_AGREEMENT` | stable — passed, "agree," all 5 |
+| proposal | stable — declined, all 5 |
+| final status | stable — `REQUIRES_REVIEW`, 5/5 |
+
+**This is the finding, stated plainly: DEMO is deterministic in its
+INPUTS — the fixture image, the quote, the prompt — never in the agent's
+read.** The agent call is a fresh inference every single run, real
+Claude nondeterminism and all; nothing about running in DEMO mode changes
+that. Final status held steady in this batch, but that's a floor, not
+evidence of stability underneath it: `SYNTHETIC_DATA` fails on every DEMO
+run regardless of anything else, so `REQUIRES_REVIEW` was guaranteed
+before any of the five calls ran. `total_score` moving between 45 and 55
+on byte-identical input, because one field out of nine didn't hold, is
+the real signal. It is easy to misread "the DEMO path" as fully
+deterministic because its inputs are — this entry exists specifically so
+that assumption is never made silently by a future session.
+
+For additional context (not part of the formal 5-run batch, but the same
+image): across every real Claude read of `EURUSD_1h_readable.png` in this
+project so far — the original LIVE capture, one earlier ad-hoc check, and
+these 5 — `trend_direction` has come back `UNCLEAR` once and `UP` six
+times. Consistent with the fixture decision above: the image is fixed and
+honest; what any single call says about it isn't guaranteed, and that is
+exactly why the guardrail exists.
+
+**Connects directly to Iteration 1's own finding.** "An empirical
+observation: proposed RR varies with what the agent was shown" (Iteration
+1's addendum) showed the same underlying fact from a different angle —
+`ed4e50b2...`'s proposed RR matched the user's own `RR=2.0` on different
+numbers, while `cd25a285...`'s (no user levels) came out to `RR≈1.83`.
+Both findings are instances of the same thing: **agent output varies with
+conditions the agent cannot be trusted to hold fixed** — what it's shown,
+in Iteration 1's case; nothing at all, run to run, in this one. Together
+they are the empirical case, not just the architectural argument, for why
+this project scores deterministically from fixed categories, never trusts
+the agent to self-score, keeps a proposal unscored until a human accepts
+it, and requires human approval on every single run regardless of score.
+An architecture built to survive an agent that can't be trusted to hold
+still is exactly the architecture this project already has — these two
+findings are the evidence it was the right call.
+
+**Iteration 4, second research question, added alongside the RR-clustering
+one already on record:** categorical stability per field, across N runs,
+on one fixed DEMO fixture. Does `trend_quality` (or any other field)
+stabilize with more samples, or stay genuinely noisy? `n=5` on one field
+settles nothing on its own — same caveat Iteration 1's `n=2` RR
+observation already carries — but it's now a second, concrete, motivating
+question for the golden-set harness Iteration 4 would build.
+
+### The frontend UI
+
+Built this iteration, not deferred — the same correction Iteration 1
+applied to its own UI after initially treating it as optional.
+
+- **`ChartCapturePanel`** (`frontend/src/components/ChartCapturePanel.tsx`)
+  gained a `role` prop (`"PRIMARY"` | `"CONFIRMATION"`, defaulting to
+  `"PRIMARY"` so every pre-existing caller is unaffected) and is now
+  rendered twice in `RunDetailView` — once for the primary capture
+  (unchanged), once for whichever capture has `timeframe_role ===
+  "CONFIRMATION"`, found by role rather than assumed to be index `[1]`
+  since it may not exist at all.
+- **`GET /runs/{run_id}/screenshot`** gained a `role` query parameter
+  (`backend/api/routes_runs.py`), same default/backward-compatibility
+  shape — an unrecognized value is a `422`, never a silent fallback to
+  `PRIMARY`. Four new tests cover the default, both roles serving
+  genuinely different files, a `404` when no confirmation capture exists,
+  and the `422` rejection.
+- **`ConfirmationAnalysisPanel`** (new component) shows the confirmation
+  call's own `visible_timeframe`/`trend_direction`/`trend_quality`, and —
+  pulled from `run.guardrail_results` by name, never re-derived on the
+  frontend — the `CROSS_TIMEFRAME_AGREEMENT` check's own pass/fail and
+  its exact reason text, with an "Agrees"/"Does not confirm" badge. When
+  there's no `confirmation_analysis` row at all, it falls back to that
+  same guardrail check's own reason text (already the correct distinct
+  N/A message — top of ladder vs. `force_scenario` suppressed — computed
+  once, on the backend, never re-guessed here). `GuardrailResultsPanel`
+  needed no changes at all: it already renders every guardrail generically
+  by name and reason, so all twelve distinct `CROSS_TIMEFRAME_AGREEMENT`
+  reason strings render correctly with zero frontend-side special-casing.
+- **Verified against the real running app, not just component tests**:
+  started the real backend and the real dev server, opened the `1h`/`4h`
+  agreeing run in a real browser — confirmed both chart panels render
+  real images (`GET .../screenshot` and `GET .../screenshot?role=
+  CONFIRMATION` both `200`, genuinely different bytes), the "Agrees"
+  badge and its reason render correctly, and all twelve guardrail rows
+  appear. Then opened the `4h`-primary/missing-`1d`-fixture run and
+  confirmed the confirmation chart panel shows "Chart capture failed" with
+  the exact fixture-missing message, and the confirmation-analysis panel
+  shows "Confirmation analysis failed — Confirmation analysis skipped --
+  confirmation capture did not succeed." — both honestly distinct, no
+  broken image, no silent fallback.
+
+### `EURUSD_4h.png` — generated, not captured
+
+The plain (non-`readable`) `EURUSD_4h.png` DEMO fixture — needed for the
+`4h` confirmation timeframe under the default `unreadable_chart` variant,
+which Milestone 5 never committed for `EURUSD` (only `EURUSD_1h.png` and
+`GBPUSD_4h.png` existed) — was generated the same way Milestone 5's
+original fixtures were: a plain abstract bar series with the identical
+"SAMPLE IMAGE — NOT REAL MARKET DATA — for offline demo/testing only"
+banner baked in, confirmed by direct visual inspection. It is **generated,
+not captured** — worth stating plainly since every other new fixture this
+iteration added (`EURUSD_1h_readable.png`) is a real capture, and the two
+should never be confused. `SYNTHETIC_DATA` (`guardrails/rules.py`) reads
+only the primary capture's mode and is structurally incapable of even
+seeing the confirmation capture — proven directly by
+`test_synthetic_data_is_derived_only_from_the_primary_capture_never_the_confirmation_one`,
+which forces the confirmation capture's mode to `LIVE` by hand and
+confirms the outcome is unchanged — so whether this image lands as
+`PRIMARY` or `CONFIRMATION` makes no difference to the rule either way.
+
+### Never committed: the pre-migration database backup
+
+`database/tradepilot.db.pre-iteration2-backup` doesn't end in `.db`, so
+the existing `*.db` gitignore rule never covered it — a real gap, closed
+by adding `*.db.pre-*-backup` to `.gitignore`. Confirmed with
+`git check-ignore -v`: the file is untracked and un-stageable. The
+evidence-run database, and everything derived from it, stays out of git
+history permanently, the same as the live database always has.
+
+Final counts after this addendum: **351 backend tests, 52 frontend
+tests.**
+
 ## Roadmap
 
 1. ~~Architecture~~

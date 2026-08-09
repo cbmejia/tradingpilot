@@ -23,7 +23,12 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from agents.trade_agent import AgentAnalysisResult, AgentAnalysisStatus
+from agents.trade_agent import (
+    AgentAnalysisResult,
+    AgentAnalysisStatus,
+    ConfirmationAnalysisResult,
+    ConfirmationAnalysisStatus,
+)
 from backend.main import app
 from capture.base import CaptureMode, CaptureResult, CaptureStatus
 from database import models  # noqa: F401 -- registers tables on Base.metadata
@@ -141,9 +146,45 @@ def _failed_market_data(message="No demo quote for EURUSD.") -> MarketQuote:
     )
 
 
-def _patched_agent(result: AgentAnalysisResult):
+def _good_confirmation_result(**overrides) -> ConfirmationAnalysisResult:
+    defaults = dict(
+        status=ConfirmationAnalysisStatus.SUCCESS,
+        visible_timeframe="4h",
+        trend_direction="UP",
+        trend_quality="STRONG",
+        timestamp=datetime.now(timezone.utc),
+        error_message=None,
+    )
+    defaults.update(overrides)
+    return ConfirmationAnalysisResult(**defaults)
+
+
+def _failed_confirmation_result(
+    message="Confirmation response could not be used: not valid JSON",
+) -> ConfirmationAnalysisResult:
+    return ConfirmationAnalysisResult(
+        status=ConfirmationAnalysisStatus.FAILED,
+        visible_timeframe=None,
+        trend_direction=None,
+        trend_quality=None,
+        timestamp=None,
+        error_message=message,
+    )
+
+
+def _patched_agent(result: AgentAnalysisResult, confirmation_result: ConfirmationAnalysisResult = None):
+    """
+    confirmation_result defaults to a FAILED result -- most existing
+    tests here predate 7A Iteration 2 and aren't testing confirmation
+    behavior at all; a failed (review-forcing) CROSS_TIMEFRAME_AGREEMENT
+    doesn't change any of their outcome assertions, since SYNTHETIC_DATA
+    already independently forces REQUIRES_REVIEW on every DEMO-mode run
+    in this file. Tests that care about confirmation behavior specifically
+    pass their own confirmation_result.
+    """
     mock_agent = MagicMock()
     mock_agent.analyze.return_value = result
+    mock_agent.analyze_confirmation.return_value = confirmation_result or _failed_confirmation_result()
     return patch("backend.orchestrator.TradeAgent", return_value=mock_agent)
 
 
@@ -167,7 +208,11 @@ def _patched_market_data_manager(result: MarketQuote):
 def test_full_demo_run_reaches_requires_review_with_synthetic_data_the_only_failure(client):
     created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
 
-    with _patched_agent(_good_agent_result()):
+    # A confirmation result that AGREES with _good_agent_result()'s own
+    # trend_direction (UP), so CROSS_TIMEFRAME_AGREEMENT passes too --
+    # this test's whole point is that SYNTHETIC_DATA is the ONE genuine
+    # problem with an otherwise-perfect DEMO run.
+    with _patched_agent(_good_agent_result(), _good_confirmation_result(trend_direction="UP")):
         response = client.post(f"/runs/{created['id']}/analyze")
 
     assert response.status_code == 200
@@ -194,10 +239,16 @@ def test_every_stage_result_is_persisted_and_readable_via_get_run(client):
 
     full_run = client.get(f"/runs/{created['id']}").json()
 
-    assert len(full_run["captures"]) == 1
+    # 7A Iteration 2: EURUSD/1h has a confirmation timeframe (4h) with a
+    # real committed DEMO fixture, so this run now has two captures --
+    # captures[0] is always PRIMARY (order_by="Capture.id" guarantees it).
+    assert len(full_run["captures"]) == 2
     assert full_run["captures"][0]["status"] == "SUCCESS"
     assert full_run["captures"][0]["capture_mode"] == "DEMO"
     assert full_run["captures"][0]["screenshot_path"] is not None
+    assert full_run["captures"][0]["timeframe_role"] == "PRIMARY"
+    assert full_run["captures"][1]["timeframe_role"] == "CONFIRMATION"
+    assert full_run["captures"][1]["timeframe"] == "4h"
 
     assert len(full_run["market_data"]) == 1
     assert full_run["market_data"][0]["status"] == "SUCCESS"
@@ -291,6 +342,7 @@ def test_failed_market_data_stops_pipeline_does_not_call_agent_but_guardrails_st
     created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
 
     mock_agent = MagicMock()
+    mock_agent.analyze_confirmation.return_value = _failed_confirmation_result()
     with _patched_market_data_manager(_failed_market_data()), patch(
         "backend.orchestrator.TradeAgent", return_value=mock_agent
     ):
@@ -404,10 +456,14 @@ def test_audit_events_appear_in_the_correct_order(client):
         "analysis_started",
         "capture_started",
         "capture_finished",
+        "confirmation_capture_started",
+        "confirmation_capture_finished",
         "market_data_started",
         "market_data_finished",
         "agent_analysis_started",
         "agent_analysis_finished",
+        "confirmation_analysis_started",
+        "confirmation_analysis_finished",
         "evaluation_started",
         "evaluation_finished",
         "guardrails_started",
@@ -432,9 +488,12 @@ def test_audit_events_appear_in_order_when_capture_fails(client):
         "analysis_started",
         "capture_started",
         "capture_finished",
+        "confirmation_capture_started",
+        "confirmation_capture_finished",
         "market_data_started",
         "market_data_finished",
         "agent_analysis_skipped",
+        "confirmation_analysis_skipped",
         "evaluation_skipped",
         "guardrails_started",
         "guardrails_finished",
@@ -869,6 +928,102 @@ def test_unknown_demo_chart_variant_value_is_rejected(client):
     assert response.status_code == 422
     full_run = client.get(f"/runs/{created['id']}").json()
     assert full_run["captures"] == []
+
+
+# ---------------------------------------------------------------------------
+# 7A Iteration 2 -- identical-confirmation-capture detection and timeframe
+# echo mismatch, at the orchestrator level. The hash comparison and the
+# echo check are both computed by backend/orchestrator.py itself (not
+# hand-fed booleans, as in guardrails/rules.py's own unit tests) -- these
+# tests prove the ACTUAL comparison fires correctly against the real
+# pipeline. Also: the direct guarantee that multi-timeframe capture never
+# turns into more than one market-data call per run.
+# ---------------------------------------------------------------------------
+
+
+def test_identical_confirmation_capture_is_detected_and_agreement_is_not_reported(client):
+    """If the TradingView timeframe switch silently doesn't take, the
+    confirmation capture is byte-identical to the primary one. This test
+    feeds the exact SAME image to both capture() calls (CaptureManager is
+    mocked with one fixed return value, so both the primary and the
+    confirmation call get back the identical CaptureResult -- same
+    screenshot_path, same bytes on disk) and proves the run does NOT
+    report agreement, even though the confirmation agent call is
+    separately configured to say it would otherwise agree."""
+    created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
+
+    identical_capture = CaptureResult(
+        mode=CaptureMode.DEMO,
+        symbol="EURUSD",
+        timeframe="1h",
+        screenshot_path="screenshots/demo/EURUSD_1h.png",
+        captured_at=datetime.now(timezone.utc),
+        status=CaptureStatus.SUCCESS,
+        error_message=None,
+    )
+
+    with _patched_capture_manager(identical_capture), _patched_agent(
+        _good_agent_result(trend_direction="UP"),
+        _good_confirmation_result(trend_direction="UP"),  # would otherwise agree
+    ):
+        response = client.post(f"/runs/{created['id']}/analyze")
+
+    assert response.status_code == 200
+    body = response.json()
+
+    assert len(body["captures"]) == 2
+    assert body["captures"][0]["screenshot_path"] == body["captures"][1]["screenshot_path"]
+
+    check = next(g for g in body["guardrail_results"] if g["guardrail_name"] == "CROSS_TIMEFRAME_AGREEMENT")
+    assert check["passed"] is False
+    assert "identical" in check["reason"].lower()
+
+    audit_types = [e["event_type"] for e in body["audit_events"]]
+    assert "confirmation_capture_identical_to_primary" in audit_types
+
+
+def test_confirmation_timeframe_echo_mismatch_is_detected(client):
+    created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
+
+    with _patched_agent(
+        _good_agent_result(trend_direction="UP"),
+        _good_confirmation_result(trend_direction="UP", visible_timeframe="1D"),  # requested confirmation is 4h
+    ):
+        response = client.post(f"/runs/{created['id']}/analyze")
+
+    assert response.status_code == 200
+    body = response.json()
+
+    check = next(g for g in body["guardrail_results"] if g["guardrail_name"] == "CROSS_TIMEFRAME_AGREEMENT")
+    assert check["passed"] is False
+    assert "does not match" in check["reason"].lower()
+
+
+def test_market_data_get_quote_is_called_exactly_once_even_with_a_confirmation_capture(client):
+    """Alpha Vantage's free-tier daily quota is the actual constrained
+    resource in this project; Anthropic calls are not (see
+    docs/iterations.md's 7A Iteration 2 entry). Multi-timeframe capture
+    (two captures per run) must never turn into two market-data fetches."""
+    created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
+
+    mock_market_data_manager = MagicMock()
+    mock_market_data_manager.get_quote.return_value = MarketQuote(
+        mode=MarketDataMode.DEMO,
+        symbol="EURUSD",
+        price=1.0921,
+        timestamp=datetime.now(timezone.utc),
+        source="demo_fixture",
+        status=MarketDataStatus.SUCCESS,
+        error_message=None,
+    )
+
+    with patch(
+        "backend.orchestrator.MarketDataManager", return_value=mock_market_data_manager
+    ), _patched_agent(_good_agent_result(), _good_confirmation_result()):
+        response = client.post(f"/runs/{created['id']}/analyze")
+
+    assert response.status_code == 200
+    mock_market_data_manager.get_quote.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

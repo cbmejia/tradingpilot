@@ -60,3 +60,8 @@ Thumbs.db
 *.sqlite3
 *.sqlite
 *.db
+# Pre-migration backups of the real dev database (e.g.
+# tradepilot.db.pre-iteration2-backup) don't end in ".db", so *.db above
+# doesn't catch them -- they hold the same evidence-run data as the live
+# database and must never enter git history either.
+*.db.pre-*-backup

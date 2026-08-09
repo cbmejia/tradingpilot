@@ -58,6 +58,26 @@ MARKET_DATA_MODE_ALLOWED_VALUES: tuple[str, ...] = ("LIVE", "DEMO")
 # from drifting apart by a dedicated test in tests/test_database.py.
 AGENT_PROPOSAL_DIRECTION_ALLOWED_VALUES: tuple[str, ...] = ("LONG", "SHORT")
 
+# 7A Iteration 2: which of a run's (up to two) captures this row is.
+# Unlike AGENT_CATEGORICAL_FIELDS/AGENT_PROPOSAL_DIRECTION_ALLOWED_VALUES,
+# this has no "real" source of truth in capture/ to duplicate from --
+# capture/ stays completely agnostic to "primary vs. confirmation," which
+# is purely an orchestration/persistence-layer distinction about WHY a
+# capture was taken, never something a CaptureProvider needs to know. Only
+# backend/orchestrator.py ever constructs this value, never a client, so
+# there's no query-param validation layer for it either -- just this
+# constant, the CHECK constraint below, and crud.py's application-level
+# check, the same double-enforcement pattern every other validated column
+# in this file already uses.
+CAPTURE_TIMEFRAME_ROLE_ALLOWED_VALUES: tuple[str, ...] = ("PRIMARY", "CONFIRMATION")
+
+# 7A Iteration 2: the confirmation call's own categorical fields.
+# Duplicated from agents.trade_agent.CONFIRMATION_TREND_DIRECTION_ALLOWED/
+# CONFIRMATION_TREND_QUALITY_ALLOWED for the same leaf-module reason as
+# AGENT_CATEGORICAL_FIELDS above.
+CONFIRMATION_TREND_DIRECTION_ALLOWED_VALUES: tuple[str, ...] = ("UP", "DOWN", "SIDEWAYS", "UNCLEAR")
+CONFIRMATION_TREND_QUALITY_ALLOWED_VALUES: tuple[str, ...] = ("STRONG", "MODERATE", "WEAK", "UNCLEAR")
+
 
 def _new_run_id() -> str:
     return uuid4().hex
@@ -108,8 +128,14 @@ class Run(Base):
     created_at: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
     completed_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
 
+    # order_by="Capture.id" (7A Iteration 2): a run can now hold up to two
+    # captures (PRIMARY, then CONFIRMATION), and the primary must always
+    # come back first -- every existing reader of run.captures[0] assumes
+    # it's the primary. Ordering by id (assigned in insertion order, and
+    # the primary is always persisted before the confirmation) makes that
+    # an explicit guarantee rather than incidental SQLite return order.
     captures: Mapped[list["Capture"]] = relationship(
-        back_populates="run", cascade="all, delete-orphan"
+        back_populates="run", cascade="all, delete-orphan", order_by="Capture.id"
     )
     market_data: Mapped[list["MarketData"]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
@@ -132,16 +158,44 @@ class Run(Base):
     proposal: Mapped["AgentProposal | None"] = relationship(
         back_populates="run", cascade="all, delete-orphan", uselist=False
     )
+    confirmation_analysis: Mapped["ConfirmationAnalysis | None"] = relationship(
+        back_populates="run", cascade="all, delete-orphan", uselist=False
+    )
 
 
 class Capture(Base):
-    """One chart-screenshot attempt (live or demo) for a run."""
+    """
+    One chart-screenshot attempt (live or demo) for a run.
+
+    timeframe_role (7A Iteration 2) -- "PRIMARY" or "CONFIRMATION" --
+    distinguishes a run's (up to two) captures from each other now that
+    `run.captures` can genuinely hold more than one row: the timeframe the
+    user actually intends to trade on ("PRIMARY", the only kind that
+    existed before this iteration) and, when the ladder has a rung above
+    it, one higher timeframe captured purely for cross-timeframe context
+    ("CONFIRMATION"). Required, never defaulted -- every capture, from
+    every era of this codebase, now has an explicit role; there is no
+    third "unspecified" state. Existing rows (from before this column
+    existed) were backfilled to "PRIMARY" by a one-time raw-SQL migration
+    against the live dev database rather than the usual "delete and
+    recreate" -- see the 7A Iteration 2 entry in docs/iterations.md for
+    why: the dev database held the only record of a real finding (agent-
+    proposed RR varying with what the agent was shown) and deleting it
+    would have destroyed that evidence.
+    """
 
     __tablename__ = "captures"
+    __table_args__ = (
+        CheckConstraint(
+            "timeframe_role IN ('PRIMARY', 'CONFIRMATION')",
+            name="ck_captures_timeframe_role_allowed",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
     run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"))
     capture_mode: Mapped[str] = mapped_column(String(10))  # "live" | "demo"
+    timeframe_role: Mapped[str] = mapped_column(String(20))  # "PRIMARY" | "CONFIRMATION"
     symbol: Mapped[str] = mapped_column(String(20))
     timeframe: Mapped[str] = mapped_column(String(10))
     screenshot_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
@@ -485,3 +539,64 @@ class AgentProposal(Base):
     timestamp: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
 
     run: Mapped["Run"] = relationship(back_populates="proposal")
+
+
+class ConfirmationAnalysis(Base):
+    """
+    The confirmation call's own read of a run's confirmation-timeframe
+    chart -- 7A Iteration 2. A SEPARATE Claude call from the run's primary
+    AgentAnalysis (see agents/trade_agent.py's TradeAgent.
+    analyze_confirmation() and its module docstring's Iteration 2 note for
+    why); this table is that call's own result, never merged with
+    agent_analyses.
+
+    run_id is unique -- a run is analyzed at most once, so at most one
+    confirmation analysis. A row exists only when a confirmation stage
+    actually applied to this run at all (i.e. the primary timeframe had a
+    rung above it on the fixed ladder) -- no row means the question was
+    never reached (top of the ladder), the same "no row vs. has_proposal
+    =False" distinction AgentProposal already draws. When a row does
+    exist, status follows the identical SUCCESS/FAILED shape every other
+    pipeline-stage table in this file already uses: SUCCESS has
+    visible_timeframe/trend_direction/trend_quality all populated, FAILED
+    has all three null and a real error_message -- covering both "the
+    confirmation capture itself failed" and "the confirmation Claude call
+    failed or was rejected."
+
+    trend_direction/trend_quality are never read by
+    evals/trade_evaluator.py -- only by guardrails/rules.py's
+    CROSS_TIMEFRAME_AGREEMENT rule, which derives agreement/disagreement
+    from these two fields plus the run's own primary trend_direction; the
+    agent never states "agreement" itself. Each is constrained to its own
+    documented allowed set by a CHECK constraint below, the same
+    database-level half of the double-enforcement pattern
+    AGENT_CATEGORICAL_FIELDS already uses (database/crud.py's
+    add_confirmation_analysis() is the application-level half).
+    """
+
+    __tablename__ = "confirmation_analyses"
+    __table_args__ = (
+        CheckConstraint(
+            "trend_direction IS NULL OR trend_direction IN ("
+            + ", ".join(f"'{v}'" for v in CONFIRMATION_TREND_DIRECTION_ALLOWED_VALUES)
+            + ")",
+            name="ck_confirmation_analyses_trend_direction_allowed",
+        ),
+        CheckConstraint(
+            "trend_quality IS NULL OR trend_quality IN ("
+            + ", ".join(f"'{v}'" for v in CONFIRMATION_TREND_QUALITY_ALLOWED_VALUES)
+            + ")",
+            name="ck_confirmation_analyses_trend_quality_allowed",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), unique=True)
+    status: Mapped[str] = mapped_column(String(10))  # "SUCCESS" | "FAILED"
+    visible_timeframe: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    trend_direction: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    trend_quality: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
+
+    run: Mapped["Run"] = relationship(back_populates="confirmation_analysis")

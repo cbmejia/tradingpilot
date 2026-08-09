@@ -19,11 +19,15 @@ from sqlalchemy.orm import Session
 from database.models import (
     AGENT_CATEGORICAL_FIELDS,
     AGENT_PROPOSAL_DIRECTION_ALLOWED_VALUES,
+    CAPTURE_TIMEFRAME_ROLE_ALLOWED_VALUES,
+    CONFIRMATION_TREND_DIRECTION_ALLOWED_VALUES,
+    CONFIRMATION_TREND_QUALITY_ALLOWED_VALUES,
     MARKET_DATA_MODE_ALLOWED_VALUES,
     AgentAnalysis,
     AgentProposal,
     AuditEvent,
     Capture,
+    ConfirmationAnalysis,
     Evaluation,
     GuardrailResult,
     HumanReview,
@@ -42,6 +46,21 @@ def _validate_mode(mode: str) -> None:
     """
     if mode not in MARKET_DATA_MODE_ALLOWED_VALUES:
         raise ValueError(f"mode={mode!r} is not one of the allowed values {MARKET_DATA_MODE_ALLOWED_VALUES}")
+
+
+def _validate_timeframe_role(timeframe_role: str) -> None:
+    """
+    Application-level half of the timeframe-role check (7A Iteration 2;
+    the other half is the CHECK constraint on Capture in
+    database/models.py). backend/orchestrator.py is the only caller that
+    ever constructs this value, and it only ever uses "PRIMARY" or
+    "CONFIRMATION", so in the normal path this never fires.
+    """
+    if timeframe_role not in CAPTURE_TIMEFRAME_ROLE_ALLOWED_VALUES:
+        raise ValueError(
+            f"timeframe_role={timeframe_role!r} is not one of the allowed values "
+            f"{CAPTURE_TIMEFRAME_ROLE_ALLOWED_VALUES}"
+        )
 
 
 def _validate_categorical_fields(**fields: Optional[str]) -> None:
@@ -168,6 +187,7 @@ def add_capture(
     *,
     run_id: str,
     capture_mode: str,
+    timeframe_role: str,
     symbol: str,
     timeframe: str,
     status: str,
@@ -175,9 +195,19 @@ def add_capture(
     captured_at: Optional[datetime] = None,
     error_message: Optional[str] = None,
 ) -> Capture:
+    """
+    timeframe_role (7A Iteration 2): "PRIMARY" or "CONFIRMATION" --
+    required, not defaulted, same "no silent defaulting" reasoning as
+    every other required categorical parameter in this file. A run's
+    first (and, before this iteration, only) capture is always PRIMARY;
+    a second capture of one higher timeframe, when the ladder has a rung
+    above the primary, is CONFIRMATION.
+    """
+    _validate_timeframe_role(timeframe_role)
     capture = Capture(
         run_id=run_id,
         capture_mode=capture_mode,
+        timeframe_role=timeframe_role,
         symbol=symbol,
         timeframe=timeframe,
         screenshot_path=screenshot_path,
@@ -534,3 +564,82 @@ def add_declined_proposal(session: Session, *, run_id: str) -> AgentProposal:
     session.commit()
     session.refresh(proposal)
     return proposal
+
+
+def _validate_confirmation_categorical_fields(
+    trend_direction: Optional[str], trend_quality: Optional[str]
+) -> None:
+    """
+    Application-level half of the confirmation call's categorical-field
+    check (7A Iteration 2; the other half is the CHECK constraint on
+    ConfirmationAnalysis in database/models.py) -- same defense-in-depth
+    reasoning as _validate_categorical_fields() above.
+    agents/trade_agent.py's own _parse_confirmation_response() already
+    rejects an out-of-set value before a confirmation analysis is ever
+    accepted as SUCCESS, so in the normal path this never fires.
+    """
+    if trend_direction is not None and trend_direction not in CONFIRMATION_TREND_DIRECTION_ALLOWED_VALUES:
+        raise ValueError(
+            f"trend_direction={trend_direction!r} is not one of the allowed values "
+            f"{CONFIRMATION_TREND_DIRECTION_ALLOWED_VALUES}"
+        )
+    if trend_quality is not None and trend_quality not in CONFIRMATION_TREND_QUALITY_ALLOWED_VALUES:
+        raise ValueError(
+            f"trend_quality={trend_quality!r} is not one of the allowed values "
+            f"{CONFIRMATION_TREND_QUALITY_ALLOWED_VALUES}"
+        )
+
+
+def add_confirmation_analysis(
+    session: Session,
+    *,
+    run_id: str,
+    visible_timeframe: str,
+    trend_direction: str,
+    trend_quality: str,
+) -> ConfirmationAnalysis:
+    """
+    Record a SUCCESSFUL confirmation analysis (7A Iteration 2) -- status
+    is always "SUCCESS" here, never a parameter, the same pattern
+    add_agent_analysis() already uses. For a failed confirmation, see
+    add_failed_confirmation_analysis() below.
+    """
+    _validate_confirmation_categorical_fields(trend_direction, trend_quality)
+    analysis = ConfirmationAnalysis(
+        run_id=run_id,
+        status="SUCCESS",
+        visible_timeframe=visible_timeframe,
+        trend_direction=trend_direction,
+        trend_quality=trend_quality,
+    )
+    session.add(analysis)
+    session.commit()
+    session.refresh(analysis)
+    return analysis
+
+
+def add_failed_confirmation_analysis(
+    session: Session,
+    *,
+    run_id: str,
+    error_message: str,
+) -> ConfirmationAnalysis:
+    """
+    Record a FAILED confirmation analysis -- the confirmation capture
+    itself failed, or the confirmation Claude call failed or was
+    rejected. Every qualitative field is null, never a fabricated
+    placeholder, the same pattern add_failed_agent_analysis() already
+    uses.
+    """
+    analysis = ConfirmationAnalysis(
+        run_id=run_id,
+        status="FAILED",
+        visible_timeframe=None,
+        trend_direction=None,
+        trend_quality=None,
+        error_message=error_message,
+    )
+    session.add(analysis)
+    session.commit()
+    session.refresh(analysis)
+    return analysis

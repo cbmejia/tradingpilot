@@ -48,26 +48,40 @@ duplicates: [docs/architecture.md](architecture.md),
   accept-and-navigate flow, all built and tested — **nothing about the UI
   is deferred anymore.**
 - **7A Iteration 2 (multi-timeframe capture + cross-timeframe agreement
-  guardrail) is approved, with three required changes, and is partway
-  built.** See "The 7A plan" below for the full approved scope. **As of
-  this doc update, the backend exists only in an uncommitted working
-  tree** — schema/migration, the confirmation agent call, orchestrator
-  wiring, the twelfth guardrail, and 335 passing backend tests are done;
-  the frontend UI, the `docs/iterations.md` entry, the commit, and the
-  `7a-iteration-2` tag are still outstanding, and one fixture-verification
-  question is still unresolved (see below). **A fresh session should run
-  `pytest` from the repo root first** to see whether that uncommitted
-  work is still present before assuming Iteration 2 hasn't started — do
-  not re-implement what's already there.
-- **The four evidence runs — do not delete, do not reset the dev
-  database.** Preserved in `database/tradepilot.db` (not committed —
-  gitignored, as always) specifically because they're the only record
-  behind two Iteration 1 findings: the proposed-RR-varies-with-context
-  observation and the leak-path proof (agent proposal math never reaching
-  the run's own score). Full detail in
-  [docs/iterations.md](iterations.md)'s Iteration 1 addendum and the RR
-  finding entry — not repeated here, just identified so nothing gets
-  reset by accident:
+  guardrail) is complete, tagged `7a-iteration-2`.** See "The 7A plan"
+  below for the full approved scope and the `## 7A Iteration 2` /
+  `## 7A Iteration 2 addendum` entries in
+  [docs/iterations.md](iterations.md) for the full build log: the
+  schema/migration, the confirmation agent call, orchestrator wiring, the
+  twelfth guardrail (`CROSS_TIMEFRAME_AGREEMENT`, with a distinct reason
+  string per cause — no "and/or" phrasing anywhere), the frontend UI
+  (confirmation chart panel, cross-timeframe agreement display), and 351
+  backend + 52 frontend tests, all passing. Two things worth knowing
+  before touching this code again:
+  - **The readable DEMO path's recorded pairing is `1h` primary / `4h`
+    confirmation**, using a real, honestly-`UNCLEAR`-reading LIVE capture
+    (`screenshots/demo/EURUSD_1h_readable.png`) committed deliberately
+    *without* retrying for a more agreeable result — see the addendum's
+    "The fixture decision" section for why retrying would have been the
+    same mistake as tuning a prompt until it proposes.
+  - **A headline finding, not a footnote:** running that exact DEMO
+    pipeline 5 times on identical input showed `trend_quality` and
+    `total_score` genuinely vary run to run (agent output is a fresh
+    inference every time — DEMO is deterministic in its inputs, never in
+    the agent's read). See the addendum's "Headline finding" section —
+    it connects directly to Iteration 1's own proposed-RR-varies finding
+    and is now a named Iteration 4 research question.
+- **The four Iteration 1 evidence runs, plus five Iteration 2 ones — do
+  not delete, do not reset the dev database.** Preserved in
+  `database/tradepilot.db` (not committed — gitignored, as always)
+  specifically because they're the only record behind three findings: the
+  proposed-RR-varies-with-context observation, the leak-path proof (agent
+  proposal math never reaching the run's own score), and the
+  categorical-stability finding (identical DEMO input, varying
+  categorical output across 5 runs). Full detail in
+  [docs/iterations.md](iterations.md)'s Iteration 1 addendum, the RR
+  finding entry, and the Iteration 2 addendum — not repeated here, just
+  identified so nothing gets reset by accident:
   - `80da6bc6...` — DEMO abstract fixture, no user levels, agent declined.
   - `832f6885...` — DEMO abstract fixture, user levels supplied, agent declined.
   - `ed4e50b2...` — LIVE EURUSD 4h, user levels `RR=2.0`, agent's own
@@ -76,11 +90,15 @@ duplicates: [docs/architecture.md](architecture.md),
     quote), no user levels, agent proposed `RR≈1.83`; the run's own
     `evaluations.risk_reward_ratio` and `risk_reward_score` are both
     `NULL` — the leak-path proof, live.
-- **Test counts:** 292 backend + 44 frontend as of the last **committed**
-  state (`a7c085c`). The uncommitted Iteration 2 backend work brings the
-  backend suite to 335 locally — not yet reflected in a commit or in
-  `docs/iterations.md`; treat both counts as provisional until Iteration
-  2 actually lands.
+  - `c7ab7dd2...`, `9acb5fca...`, `3a064fbf...`, `74b591cf...`,
+    `75df8200...` — the 5-run categorical-stability batch (Iteration 2
+    addendum): same `1h`/`4h` readable-path DEMO fixtures, same trade
+    params, no code changes between runs; `trend_quality` and
+    `total_score` still varied.
+- **Test counts:** 292 backend + 44 frontend at the end of Iteration 1
+  (`a7c085c`). **351 backend + 52 frontend as of Iteration 2**
+  (`7a-iteration-2`) — the full per-file breakdown is in
+  [docs/iterations.md](iterations.md)'s Iteration 2 entry.
 - **Alpha Vantage's free-tier daily quota (25 requests) was exhausted
   during Iteration 1's live verification** and its status is still
   unknown — no visibility into the exact remaining count or reset time
@@ -116,13 +134,15 @@ milestones.
    correctly declined; see docs/iterations.md's addendum for the full
    live-run evidence). Tagged `7a-iteration-1`.
 2. **Iteration 2 — multi-timeframe capture + cross-timeframe agreement
-   guardrail.** Design approved. **Status: backend implemented in an
-   uncommitted working tree (335 backend tests passing at the time of
-   this doc update) — frontend UI, the `docs/iterations.md` entry,
-   commit, and the `7a-iteration-2` tag are still outstanding.** Every
-   6C and 7A Iteration 1 invariant (section 4 below) is unchanged by this
-   scope — confirmed structurally (no new scoring path, guardrails still
-   only ever downgrade, no new fallback logic), not just asserted.
+   guardrail.** **Complete — backend, frontend, and full test suite (351
+   backend + 52 frontend) all built, tested, and verified against a real
+   Claude call.** Tagged `7a-iteration-2`. Every 6C and 7A Iteration 1
+   invariant (section 4 below) is unchanged by this scope — confirmed
+   structurally (no new scoring path, guardrails still only ever
+   downgrade, no new fallback logic), not just asserted. See the `## 7A
+   Iteration 2` and `## 7A Iteration 2 addendum` entries in
+   [docs/iterations.md](iterations.md) for the full build log, the
+   fixture decision, and the categorical-stability finding.
 
    **Approved scope:**
    - Two timeframes via a fixed ladder
@@ -193,18 +213,17 @@ milestones.
       subsequent schema change, and confirmed to still have their
       proposals and evaluations intact throughout.
 
-   **Also required before committing the new DEMO fixture, not yet
-   resolved:** verify that a fresh `EURUSD_1h_readable` capture actually
-   agrees with the already-committed `EURUSD_4h_readable.png` rather than
-   assuming it — the same "verify, don't assume" lesson as the original
-   abstract-fixture finding. **Done once, inconclusive:** a fresh LIVE
-   1h capture came back `trend_direction=UNCLEAR` against the existing 4h
-   fixture — fail-closed, neither agreement nor disagreement, plausibly a
-   real closed-weekend-market artifact rather than a bug. Not yet
-   decided: retry the capture, keep this result as the (also legitimate)
-   fail-closed demo path, or try a different symbol/timeframe pair. A
-   fresh session should ask before committing any `EURUSD_1h_readable.png`
-   fixture rather than assuming an answer.
+   **Resolved: the DEMO fixture-verification question above.** A fresh
+   LIVE `1h` capture came back `trend_direction=UNCLEAR` against the
+   existing `4h` fixture — fail-closed, not agreement or disagreement.
+   Decision: keep it, do not retry for a more agreeable read (retrying
+   would be selecting a fixture on its outcome, the same mistake already
+   rejected for the prompt itself). Committed as
+   `screenshots/demo/EURUSD_1h_readable.png`; agreement and disagreement
+   are covered by hand-built unit fixtures instead, so neither depends on
+   live market conditions. Full reasoning in
+   [docs/iterations.md](iterations.md)'s Iteration 2 addendum, "The
+   fixture decision."
 3. **Iteration 3 — economic calendar tool + event-proximity block.**
    Wires up `tools/economic_calendar.py` — scaffolded since the early
    milestones, mentioned in [docs/architecture.md](architecture.md) as

@@ -6,7 +6,13 @@
 
 from datetime import datetime, timedelta, timezone
 
-from agents.trade_agent import AgentAnalysisResult, AgentAnalysisStatus, TradeParams
+from agents.trade_agent import (
+    AgentAnalysisResult,
+    AgentAnalysisStatus,
+    ConfirmationAnalysisResult,
+    ConfirmationAnalysisStatus,
+    TradeParams,
+)
 from capture.base import CaptureMode, CaptureResult, CaptureStatus
 from capture.demo_provider import DemoProvider
 from evals.trade_evaluator import EvaluationResult, EvaluationStatus, evaluate
@@ -124,7 +130,7 @@ def test_perfect_live_run_reaches_ready_for_review():
     assert all(c.passed for c in report.checks)
 
 
-def test_all_eleven_rules_are_always_present():
+def test_all_twelve_rules_are_always_present():
     capture, market_data, analysis, evaluation, params = _perfect_run()
 
     report = evaluate_guardrails(capture, market_data, analysis, evaluation, params, now=NOW)
@@ -141,9 +147,10 @@ def test_all_eleven_rules_are_always_present():
         "UNCERTAINTY_ACCEPTABLE",
         "SCORE_THRESHOLD",
         "SYNTHETIC_DATA",
+        "CROSS_TIMEFRAME_AGREEMENT",
     }
     assert {c.name for c in report.checks} == expected_names
-    assert len(report.checks) == 11
+    assert len(report.checks) == 12
 
 
 # ---------------------------------------------------------------------------
@@ -157,8 +164,8 @@ def test_all_rules_still_evaluated_when_the_first_one_fails():
 
     report = evaluate_guardrails(broken_capture, market_data, analysis, evaluation, params, now=NOW)
 
-    # 11 rules ran, not just the one that failed first.
-    assert len(report.checks) == 11
+    # All 12 rules ran, not just the one that failed first.
+    assert len(report.checks) == 12
     checks = _checks_by_name(report)
     assert checks["CAPTURE_SUCCEEDED"].passed is False
     # Rules independent of capture still ran and still passed.
@@ -487,6 +494,44 @@ def test_demo_market_data_can_never_reach_ready_for_review_even_with_a_perfect_s
     assert report.outcome == GuardrailOutcome.REQUIRES_REVIEW
 
 
+def test_synthetic_data_is_derived_only_from_the_primary_capture_never_the_confirmation_one():
+    """7A Iteration 2 note: SYNTHETIC_DATA never takes a confirmation_*
+    argument at all -- backend/orchestrator.py always constructs both the
+    primary and confirmation captures from ONE shared CaptureManager
+    instance (capture/manager.py reads CAPTURE_MODE exactly once and
+    reuses that same provider for both calls), so the two captures can
+    never disagree on mode in real use. This test proves SYNTHETIC_DATA's
+    verdict is genuinely unaffected by whatever's passed as the
+    confirmation capture -- it doesn't just happen to agree because real
+    callers keep them in sync, it structurally never looks at the
+    confirmation capture's mode at all. Whether EURUSD_4h.png happens to
+    be served as PRIMARY or as CONFIRMATION makes no difference to this
+    rule either way."""
+    _c, market_data, analysis, evaluation, params = _perfect_run()
+    demo_capture = _fresh_capture(mode=CaptureMode.DEMO)
+
+    report_no_confirmation = evaluate_guardrails(
+        demo_capture, market_data, analysis, evaluation, params, now=NOW
+    )
+    report_live_confirmation = evaluate_guardrails(
+        demo_capture, market_data, analysis, evaluation, params, now=NOW,
+        confirmation_timeframe="4h",
+        confirmation_capture_result=_good_confirmation_capture(mode=CaptureMode.LIVE),
+        confirmation_agent_result=_good_confirmation_result(trend_direction="UP"),
+    )
+    report_demo_confirmation = evaluate_guardrails(
+        demo_capture, market_data, analysis, evaluation, params, now=NOW,
+        confirmation_timeframe="4h",
+        confirmation_capture_result=_good_confirmation_capture(mode=CaptureMode.DEMO),
+        confirmation_agent_result=_good_confirmation_result(trend_direction="UP"),
+    )
+
+    for report in (report_no_confirmation, report_live_confirmation, report_demo_confirmation):
+        check = _checks_by_name(report)["SYNTHETIC_DATA"]
+        assert check.passed is False
+        assert report.outcome == GuardrailOutcome.REQUIRES_REVIEW
+
+
 # ---------------------------------------------------------------------------
 # There is no approved state, anywhere
 # ---------------------------------------------------------------------------
@@ -633,3 +678,317 @@ def test_genuinely_stale_live_quote_still_blocks_freshness_not_weakened():
 
     assert _checks_by_name(report)["MARKET_DATA_FRESH"].passed is False
     assert report.outcome == GuardrailOutcome.BLOCKED
+
+
+# ---------------------------------------------------------------------------
+# l. CROSS_TIMEFRAME_AGREEMENT (7A Iteration 2)
+# ---------------------------------------------------------------------------
+
+
+def _good_confirmation_capture(**overrides) -> CaptureResult:
+    defaults = dict(
+        mode=CaptureMode.LIVE,
+        symbol="EURUSD",
+        timeframe="4h",
+        screenshot_path="screenshots/live/EURUSD_4h_confirmation.png",
+        captured_at=NOW - timedelta(seconds=10),
+        status=CaptureStatus.SUCCESS,
+        error_message=None,
+    )
+    defaults.update(overrides)
+    return CaptureResult(**defaults)
+
+
+def _good_confirmation_result(**overrides) -> ConfirmationAnalysisResult:
+    defaults = dict(
+        status=ConfirmationAnalysisStatus.SUCCESS,
+        visible_timeframe="4h",
+        trend_direction="UP",
+        trend_quality="STRONG",
+        timestamp=NOW - timedelta(seconds=5),
+        error_message=None,
+    )
+    defaults.update(overrides)
+    return ConfirmationAnalysisResult(**defaults)
+
+
+def test_cross_timeframe_agreement_na_when_no_confirmation_timeframe_exists():
+    """Top of the ladder -- nothing to compare against. N/A passes,
+    rather than permanently penalizing every run on the ladder's top
+    rung. Distinct reason text from the force_scenario-suppressed N/A
+    below -- see test_cross_timeframe_agreement_na_reasons_are_distinct."""
+    capture, market_data, analysis, evaluation, params = _perfect_run()
+
+    report = evaluate_guardrails(
+        capture, market_data, analysis, evaluation, params, now=NOW,
+        confirmation_timeframe=None,
+    )
+
+    check = _checks_by_name(report)["CROSS_TIMEFRAME_AGREEMENT"]
+    assert check.passed is True
+    assert "N/A: primary at top of ladder" in check.reason
+
+
+def test_cross_timeframe_agreement_na_when_force_scenario_active():
+    """Milestone 12's force_scenario mechanism never exercises the
+    confirmation path (see backend/orchestrator.py's run_pipeline()
+    docstring) -- this is also N/A, but for a structurally different
+    reason than being at the top of the ladder, and must say so."""
+    capture, market_data, analysis, evaluation, params = _perfect_run()
+
+    report = evaluate_guardrails(
+        capture, market_data, analysis, evaluation, params, now=NOW,
+        confirmation_timeframe=None,
+        force_scenario_active=True,
+    )
+
+    check = _checks_by_name(report)["CROSS_TIMEFRAME_AGREEMENT"]
+    assert check.passed is True
+    assert "N/A: suppressed by force_scenario" in check.reason
+
+
+def test_cross_timeframe_agreement_reason_text_is_distinct_per_cause():
+    """One test per cause, all in one place, proving every failure/N/A
+    reason string is genuinely distinct from every other -- no two causes
+    share a generic message a reader could confuse for one another, and
+    no branch uses 'and/or' phrasing that hides which side actually
+    failed."""
+    capture, market_data, analysis, evaluation, params = _perfect_run()
+    sideways_analysis = _good_analysis(trend_direction="SIDEWAYS")
+    sideways_evaluation = evaluate(sideways_analysis, params)
+
+    def reason_for(**kwargs) -> str:
+        report = evaluate_guardrails(
+            capture, market_data, analysis, evaluation, params, now=NOW, **kwargs
+        )
+        return _checks_by_name(report)["CROSS_TIMEFRAME_AGREEMENT"].reason
+
+    reasons = {
+        "na_top_of_ladder": reason_for(confirmation_timeframe=None),
+        "na_force_scenario": reason_for(confirmation_timeframe=None, force_scenario_active=True),
+        "confirmation_capture_failed": reason_for(
+            confirmation_timeframe="4h",
+            confirmation_capture_result=_good_confirmation_capture(
+                status=CaptureStatus.FAILED, screenshot_path=None,
+                error_message="No demo fixture for EURUSD 1d.",
+            ),
+            confirmation_agent_result=None,
+        ),
+        "identical_hash": reason_for(
+            confirmation_timeframe="4h",
+            confirmation_capture_result=_good_confirmation_capture(),
+            confirmation_agent_result=_good_confirmation_result(trend_direction="UP"),
+            confirmation_capture_matches_primary_hash=True,
+        ),
+        "timeframe_echo_mismatch": reason_for(
+            confirmation_timeframe="4h",
+            confirmation_capture_result=_good_confirmation_capture(),
+            confirmation_agent_result=_good_confirmation_result(visible_timeframe="1D"),
+        ),
+        "primary_non_directional": (
+            lambda report: _checks_by_name(report)["CROSS_TIMEFRAME_AGREEMENT"].reason
+        )(
+            evaluate_guardrails(
+                capture, market_data, sideways_analysis, sideways_evaluation, params, now=NOW,
+                confirmation_timeframe="4h",
+                confirmation_capture_result=_good_confirmation_capture(),
+                confirmation_agent_result=_good_confirmation_result(trend_direction="UP"),
+            )
+        ),
+        "confirmation_non_directional": reason_for(
+            confirmation_timeframe="4h",
+            confirmation_capture_result=_good_confirmation_capture(),
+            confirmation_agent_result=_good_confirmation_result(
+                trend_direction="UNCLEAR", trend_quality="UNCLEAR"
+            ),
+        ),
+    }
+
+    assert len(set(reasons.values())) == len(reasons), (
+        f"expected every cause to have a distinct reason string, got: {reasons}"
+    )
+    assert "N/A: primary at top of ladder" in reasons["na_top_of_ladder"]
+    assert "N/A: suppressed by force_scenario" in reasons["na_force_scenario"]
+    assert "confirmation capture failed" in reasons["confirmation_capture_failed"].lower()
+    assert "identical image hash" in reasons["identical_hash"].lower()
+    assert "timeframe echo mismatch" in reasons["timeframe_echo_mismatch"].lower()
+    assert "primary read non-directional" in reasons["primary_non_directional"].lower()
+    assert "confirmation read non-directional" in reasons["confirmation_non_directional"].lower()
+    for reason in reasons.values():
+        assert "and/or" not in reason.lower()
+
+
+def test_cross_timeframe_agreement_passes_when_primary_and_confirmation_agree():
+    capture, market_data, analysis, evaluation, params = _perfect_run()
+    assert analysis.trend_direction == "UP"  # _good_analysis()'s own default
+
+    report = evaluate_guardrails(
+        capture, market_data, analysis, evaluation, params, now=NOW,
+        confirmation_timeframe="4h",
+        confirmation_capture_result=_good_confirmation_capture(),
+        confirmation_agent_result=_good_confirmation_result(trend_direction="UP"),
+    )
+
+    check = _checks_by_name(report)["CROSS_TIMEFRAME_AGREEMENT"]
+    assert check.passed is True
+    assert "agree" in check.reason.lower()
+    assert report.outcome != GuardrailOutcome.BLOCKED
+
+
+def test_cross_timeframe_agreement_fails_closed_on_disagreement():
+    capture, market_data, analysis, evaluation, params = _perfect_run()
+    assert analysis.trend_direction == "UP"
+
+    report = evaluate_guardrails(
+        capture, market_data, analysis, evaluation, params, now=NOW,
+        confirmation_timeframe="4h",
+        confirmation_capture_result=_good_confirmation_capture(),
+        confirmation_agent_result=_good_confirmation_result(trend_direction="DOWN"),
+    )
+
+    check = _checks_by_name(report)["CROSS_TIMEFRAME_AGREEMENT"]
+    assert check.passed is False
+    assert "disagree" in check.reason.lower()
+    assert report.outcome == GuardrailOutcome.REQUIRES_REVIEW  # forces review, never blocks
+
+
+def test_cross_timeframe_agreement_fails_closed_when_confirmation_capture_failed():
+    capture, market_data, analysis, evaluation, params = _perfect_run()
+
+    report = evaluate_guardrails(
+        capture, market_data, analysis, evaluation, params, now=NOW,
+        confirmation_timeframe="4h",
+        confirmation_capture_result=_good_confirmation_capture(
+            status=CaptureStatus.FAILED, screenshot_path=None, error_message="Chart element never appeared."
+        ),
+        confirmation_agent_result=None,
+    )
+
+    check = _checks_by_name(report)["CROSS_TIMEFRAME_AGREEMENT"]
+    assert check.passed is False
+    assert "confirmation capture failed" in check.reason.lower()
+
+
+def test_cross_timeframe_agreement_fails_closed_on_identical_hash():
+    """The hash comparison itself is computed by backend/orchestrator.py
+    (it has both screenshot paths in hand right after capturing them) --
+    this test proves the guardrail fails closed once told the hashes
+    matched, regardless of what the confirmation agent otherwise said."""
+    capture, market_data, analysis, evaluation, params = _perfect_run()
+
+    report = evaluate_guardrails(
+        capture, market_data, analysis, evaluation, params, now=NOW,
+        confirmation_timeframe="4h",
+        confirmation_capture_result=_good_confirmation_capture(),
+        confirmation_agent_result=_good_confirmation_result(trend_direction="UP"),  # would otherwise agree
+        confirmation_capture_matches_primary_hash=True,
+    )
+
+    check = _checks_by_name(report)["CROSS_TIMEFRAME_AGREEMENT"]
+    assert check.passed is False
+    assert "identical" in check.reason.lower()
+
+
+def test_cross_timeframe_agreement_fails_closed_on_timeframe_echo_mismatch():
+    capture, market_data, analysis, evaluation, params = _perfect_run()
+
+    report = evaluate_guardrails(
+        capture, market_data, analysis, evaluation, params, now=NOW,
+        confirmation_timeframe="4h",
+        confirmation_capture_result=_good_confirmation_capture(),
+        confirmation_agent_result=_good_confirmation_result(visible_timeframe="1D"),  # requested 4h
+    )
+
+    check = _checks_by_name(report)["CROSS_TIMEFRAME_AGREEMENT"]
+    assert check.passed is False
+    assert "does not match" in check.reason.lower()
+
+
+def test_cross_timeframe_agreement_echo_match_is_case_and_whitespace_insensitive():
+    capture, market_data, analysis, evaluation, params = _perfect_run()
+
+    report = evaluate_guardrails(
+        capture, market_data, analysis, evaluation, params, now=NOW,
+        confirmation_timeframe="4h",
+        confirmation_capture_result=_good_confirmation_capture(),
+        confirmation_agent_result=_good_confirmation_result(visible_timeframe=" 4H "),
+    )
+
+    assert _checks_by_name(report)["CROSS_TIMEFRAME_AGREEMENT"].passed is True
+
+
+def test_cross_timeframe_agreement_fails_closed_when_confirmation_analysis_failed():
+    capture, market_data, analysis, evaluation, params = _perfect_run()
+
+    report = evaluate_guardrails(
+        capture, market_data, analysis, evaluation, params, now=NOW,
+        confirmation_timeframe="4h",
+        confirmation_capture_result=_good_confirmation_capture(),
+        confirmation_agent_result=_good_confirmation_result(
+            status=ConfirmationAnalysisStatus.FAILED, visible_timeframe=None,
+            trend_direction=None, trend_quality=None,
+            error_message="Confirmation response could not be used: not valid JSON",
+        ),
+    )
+
+    check = _checks_by_name(report)["CROSS_TIMEFRAME_AGREEMENT"]
+    assert check.passed is False
+    assert "confirmation analysis did not succeed" in check.reason.lower()
+
+
+def test_cross_timeframe_agreement_fails_closed_when_confirmation_trend_is_unclear():
+    capture, market_data, analysis, evaluation, params = _perfect_run()
+
+    report = evaluate_guardrails(
+        capture, market_data, analysis, evaluation, params, now=NOW,
+        confirmation_timeframe="4h",
+        confirmation_capture_result=_good_confirmation_capture(),
+        confirmation_agent_result=_good_confirmation_result(trend_direction="UNCLEAR", trend_quality="UNCLEAR"),
+    )
+
+    check = _checks_by_name(report)["CROSS_TIMEFRAME_AGREEMENT"]
+    assert check.passed is False
+    assert "confirmation read non-directional" in check.reason.lower()
+
+
+def test_cross_timeframe_agreement_fails_closed_when_primary_trend_is_sideways():
+    capture, market_data, _analysis, _evaluation, params = _perfect_run()
+    sideways_analysis = _good_analysis(trend_direction="SIDEWAYS")
+    evaluation = evaluate(sideways_analysis, params)
+
+    report = evaluate_guardrails(
+        capture, market_data, sideways_analysis, evaluation, params, now=NOW,
+        confirmation_timeframe="4h",
+        confirmation_capture_result=_good_confirmation_capture(),
+        confirmation_agent_result=_good_confirmation_result(trend_direction="UP"),
+    )
+
+    check = _checks_by_name(report)["CROSS_TIMEFRAME_AGREEMENT"]
+    assert check.passed is False
+    assert "primary read non-directional" in check.reason.lower()
+
+
+def test_cross_timeframe_agreement_is_a_review_forcing_rule_not_blocking():
+    """Even a total disagreement never BLOCKS on its own -- the pipeline
+    worked and produced something real, just directionally conflicted,
+    the same category UNCERTAINTY_ACCEPTABLE/SYNTHETIC_DATA are already
+    in."""
+    from guardrails.rules import BLOCKING_RULES, REVIEW_FORCING_RULES
+
+    assert "CROSS_TIMEFRAME_AGREEMENT" in REVIEW_FORCING_RULES
+    assert "CROSS_TIMEFRAME_AGREEMENT" not in BLOCKING_RULES
+
+
+def test_cross_timeframe_agreement_defaults_to_na_when_no_confirmation_args_are_passed():
+    """A caller that doesn't pass any confirmation_* arguments at all
+    (e.g. every pre-7A-Iteration-2 caller) gets the N/A/pass default --
+    the twelfth rule exists and is recorded, but never changes the
+    outcome for a caller that knows nothing about confirmation
+    timeframes."""
+    capture, market_data, analysis, evaluation, params = _perfect_run()
+
+    report = evaluate_guardrails(capture, market_data, analysis, evaluation, params, now=NOW)
+
+    check = _checks_by_name(report)["CROSS_TIMEFRAME_AGREEMENT"]
+    assert check.passed is True
+    assert report.outcome == GuardrailOutcome.READY_FOR_REVIEW

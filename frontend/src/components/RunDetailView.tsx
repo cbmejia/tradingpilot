@@ -7,6 +7,7 @@ import { MarketDataPanel } from "./MarketDataPanel";
 import { AgentAnalysisPanel } from "./AgentAnalysisPanel";
 import { ScoreBreakdown } from "./ScoreBreakdown";
 import { AgentProposalPanel } from "./AgentProposalPanel";
+import { ConfirmationAnalysisPanel } from "./ConfirmationAnalysisPanel";
 import { GuardrailResultsPanel } from "./GuardrailResultsPanel";
 import { ReviewPanel } from "./ReviewPanel";
 
@@ -49,6 +50,16 @@ export function RunDetailView({
 }: RunDetailViewProps) {
   const demo = isDemoRun(run);
   const forced = forcedScenario(run);
+  // 7A Iteration 2: a run's primary capture is always captures[0]
+  // (database/models.py's Run.captures relationship guarantees primary
+  // is persisted, and ordered, first) -- the confirmation capture, if
+  // this run's timeframe had a rung above it on the ladder, is found by
+  // role rather than assumed to be captures[1], since it may not exist
+  // at all.
+  const confirmationCapture = run.captures.find((c) => c.timeframe_role === "CONFIRMATION");
+  const crossTimeframeCheck = run.guardrail_results.find(
+    (g) => g.guardrail_name === "CROSS_TIMEFRAME_AGREEMENT",
+  );
 
   return (
     <div className="flex flex-col gap-4">
@@ -85,13 +96,30 @@ export function RunDetailView({
       </div>
 
       <div className="grid gap-4 lg:grid-cols-2">
-        <Card title="Chart capture">
-          <ChartCapturePanel runId={run.id} capture={run.captures[0]} />
+        <Card title="Chart capture" subtitle="Primary — the timeframe this run is actually about">
+          <ChartCapturePanel runId={run.id} capture={run.captures[0]} role="PRIMARY" />
         </Card>
         <Card title="Market snapshot">
           <MarketDataPanel marketData={run.market_data[0]} />
         </Card>
       </div>
+
+      <Card
+        title="Confirmation chart"
+        subtitle="One rung up the timeframe ladder — captured for cross-timeframe context, never scored"
+      >
+        <ChartCapturePanel runId={run.id} capture={confirmationCapture} role="CONFIRMATION" />
+      </Card>
+
+      <Card
+        title="Cross-timeframe confirmation"
+        subtitle="Derived by the orchestrator, never stated by the agent — see docs/architecture.md"
+      >
+        <ConfirmationAnalysisPanel
+          confirmationAnalysis={run.confirmation_analysis}
+          crossTimeframeCheck={crossTimeframeCheck}
+        />
+      </Card>
 
       <Card title="Agent analysis" subtitle="Prose for a human reviewer, plus the categories the rubric scores from">
         <AgentAnalysisPanel analysis={run.analyses[0]} />
@@ -121,7 +149,7 @@ export function RunDetailView({
         />
       </Card>
 
-      <Card title="Guardrails" subtitle="All eleven checks, every time">
+      <Card title="Guardrails" subtitle="All twelve checks, every time">
         <GuardrailResultsPanel results={run.guardrail_results} />
       </Card>
 

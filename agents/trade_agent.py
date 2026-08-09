@@ -40,6 +40,23 @@
 # whatever its value type -- see SCORE_LIKE_KEYWORDS below. None of this
 # widens what evals/trade_evaluator.py reads; see docs/handoff.md's "The
 # 7A-specific invariant" for why the carve-out has to stay this narrow.
+#
+# 7A Iteration 2 note: TradeAgent.analyze_confirmation() is a SEPARATE
+# Claude call from analyze() -- one image (a second, higher timeframe,
+# for cross-timeframe context), a dedicated minimal prompt, and only three
+# fields back (confirmation_visible_timeframe/confirmation_trend_direction/
+# confirmation_trend_quality). Deliberately NOT folded into analyze() as a
+# second image in the same call: Iteration 1's own live-run evidence found
+# the agent's categorical output varies with what it's shown (see
+# docs/iterations.md's Iteration 1 addendum -- proposed RR differed
+# between a run with user-supplied levels and one without). Conditioning
+# analyze()'s five SCORED categories on a second image would change what
+# those categories mean, silently, breaking 6C's own comparability and
+# removing Iteration 4's reproducibility baseline before it's even built.
+# analyze() itself -- its prompt, its image count, its fields -- is
+# completely untouched by this addition; see
+# test_primary_call_payload_is_unchanged_by_the_existence_of_analyze_confirmation
+# in tests/test_agent.py for the proof.
 
 from __future__ import annotations
 
@@ -64,6 +81,11 @@ load_dotenv()
 PROMPTS_DIR = Path(__file__).resolve().parent.parent / "prompts"
 SYSTEM_PROMPT_PATH = PROMPTS_DIR / "system_prompt.md"
 ANALYSIS_PROMPT_PATH = PROMPTS_DIR / "analysis_prompt.md"
+# 7A Iteration 2 -- the confirmation call's own prompt files, entirely
+# separate from the two above. analyze() never reads these; analyze_
+# confirmation() never reads SYSTEM_PROMPT_PATH/ANALYSIS_PROMPT_PATH.
+CONFIRMATION_SYSTEM_PROMPT_PATH = PROMPTS_DIR / "confirmation_system_prompt.md"
+CONFIRMATION_ANALYSIS_PROMPT_PATH = PROMPTS_DIR / "confirmation_analysis_prompt.md"
 
 DEFAULT_TIMEOUT_SECONDS = 60.0  # hard cap on the Claude API call -- no infinite wait
 
@@ -78,6 +100,13 @@ DEFAULT_TIMEOUT_SECONDS = 60.0  # hard cap on the Claude API call -- no infinite
 # "max_tokens") -- see docs/iterations.md's "fix: agent response
 # truncation on live runs" entry for the diagnosis.
 DEFAULT_MAX_TOKENS = 2048
+
+# 7A Iteration 2 -- sized for the confirmation call's own tiny response
+# shape: one short free-text field plus two one-word categories, no prose
+# at all. Deliberately its own, much smaller, constant -- not reused from
+# DEFAULT_MAX_TOKENS above, since that value was sized for a completely
+# different (much larger) response shape.
+CONFIRMATION_DEFAULT_MAX_TOKENS = 256
 
 TEXT_FIELDS = (
     "analysis_text",
@@ -122,6 +151,21 @@ PROPOSAL_FIELDS = {PROPOSAL_HAS_PROPOSAL_FIELD, PROPOSAL_DIRECTION_FIELD} | set(
 SCORE_LIKE_KEYWORDS = ("probability", "percent", "confidence", "likelihood", "odds")
 
 EXPECTED_FIELDS = set(TEXT_FIELDS) | {"uncertainty"} | set(CATEGORICAL_FIELDS) | PROPOSAL_FIELDS
+
+# 7A Iteration 2 -- the confirmation call's own, much smaller, field set.
+# Deliberately disjoint from EXPECTED_FIELDS above: this is a genuinely
+# separate response shape from a genuinely separate Claude call, not a
+# subset or extension of the primary analysis.
+CONFIRMATION_VISIBLE_TIMEFRAME_FIELD = "confirmation_visible_timeframe"
+CONFIRMATION_TREND_DIRECTION_FIELD = "confirmation_trend_direction"
+CONFIRMATION_TREND_QUALITY_FIELD = "confirmation_trend_quality"
+CONFIRMATION_TREND_DIRECTION_ALLOWED = {"UP", "DOWN", "SIDEWAYS", "UNCLEAR"}
+CONFIRMATION_TREND_QUALITY_ALLOWED = {"STRONG", "MODERATE", "WEAK", "UNCLEAR"}
+CONFIRMATION_EXPECTED_FIELDS = {
+    CONFIRMATION_VISIBLE_TIMEFRAME_FIELD,
+    CONFIRMATION_TREND_DIRECTION_FIELD,
+    CONFIRMATION_TREND_QUALITY_FIELD,
+}
 
 
 class AgentAnalysisStatus(str, Enum):
@@ -190,6 +234,38 @@ class AgentAnalysisResult:
     error_message: Optional[str] = None
 
 
+class ConfirmationAnalysisStatus(str, Enum):
+    SUCCESS = "SUCCESS"
+    FAILED = "FAILED"
+
+
+@dataclass(frozen=True)
+class ConfirmationAnalysisResult:
+    """
+    What every confirmation-call attempt returns, success or failure
+    alike (7A Iteration 2). Deliberately not a variant of
+    AgentAnalysisResult -- it's a genuinely different, much smaller
+    response shape from a genuinely separate Claude call.
+
+    visible_timeframe is the model's own transcription of whatever
+    timeframe label it actually saw on the chart -- backend/orchestrator.py
+    (not this module) checks it against the timeframe that was actually
+    requested, since this module has no way to know that. trend_direction/
+    trend_quality use the identical allowed sets as AgentAnalysisResult's
+    own trend_direction/trend_quality, but are never read by
+    evals/trade_evaluator.py -- only by the CROSS_TIMEFRAME_AGREEMENT
+    guardrail, which backend/orchestrator.py derives deterministically
+    from these two fields; the agent never states "agreement" itself.
+    """
+
+    status: ConfirmationAnalysisStatus
+    visible_timeframe: Optional[str]
+    trend_direction: Optional[str]  # "UP" | "DOWN" | "SIDEWAYS" | "UNCLEAR"
+    trend_quality: Optional[str]  # "STRONG" | "MODERATE" | "WEAK" | "UNCLEAR"
+    timestamp: Optional[datetime]
+    error_message: Optional[str] = None
+
+
 def _load_image_as_base64(path: str) -> tuple[str, str]:
     file_path = Path(path)
     data = file_path.read_bytes()
@@ -243,6 +319,41 @@ def _strip_markdown_fence(raw_text: str) -> str:
     return text
 
 
+def _reject_suspicious_extra_fields(data: dict, expected_fields: set[str]) -> None:
+    """
+    THE HARD BOUNDARY, shared by every response parser in this module
+    (_parse_response for the primary call, _parse_confirmation_response
+    for 7A Iteration 2's confirmation call): any extra field (not in
+    expected_fields) carrying a number is treated as an attempted score
+    and rejects the whole response. An extra field is also rejected
+    purely by NAME if it looks like a smuggled probability/confidence/
+    percentage/likelihood/odds, regardless of whether its value happens
+    to be numeric yet -- "confidence": "high" is exactly as much a
+    violation as "confidence_score": 87, and this is what makes that a
+    code-enforced rule rather than a prompt request. Factored out into
+    one function specifically so this security-critical check can never
+    drift between the two response shapes -- both call sites get exactly
+    the same rule, always.
+    """
+    extra_keys = set(data.keys()) - expected_fields
+    numeric_extras = [
+        key
+        for key in extra_keys
+        if isinstance(data[key], (int, float)) and not isinstance(data[key], bool)
+    ]
+    score_like_extras = [
+        key for key in extra_keys if any(keyword in key.lower() for keyword in SCORE_LIKE_KEYWORDS)
+    ]
+    suspicious_extras = sorted(set(numeric_extras) | set(score_like_extras))
+    if suspicious_extras:
+        raise ValueError(
+            f"response included numeric field(s) or field(s) named like a smuggled score, "
+            f"rating, probability, or confidence value: {suspicious_extras} -- the agent "
+            f"never accepts a score, rating, or confidence number (or word) from the model, "
+            f"under any field name"
+        )
+
+
 def _parse_response(raw_text: str) -> dict:
     """
     Parses and validates Claude's reply against the expected qualitative
@@ -264,30 +375,7 @@ def _parse_response(raw_text: str) -> dict:
     if missing:
         raise ValueError(f"response is missing required field(s): {sorted(missing)}")
 
-    # THE HARD BOUNDARY: any extra field carrying a number is treated as
-    # an attempted score and rejects the whole response. An extra field
-    # is also rejected purely by NAME if it looks like a smuggled
-    # probability/confidence/percentage/likelihood/odds, regardless of
-    # whether its value happens to be numeric yet -- "confidence": "high"
-    # is exactly as much a violation as "confidence_score": 87, and this
-    # is what makes that a code-enforced rule rather than a prompt request.
-    extra_keys = set(data.keys()) - EXPECTED_FIELDS
-    numeric_extras = [
-        key
-        for key in extra_keys
-        if isinstance(data[key], (int, float)) and not isinstance(data[key], bool)
-    ]
-    score_like_extras = [
-        key for key in extra_keys if any(keyword in key.lower() for keyword in SCORE_LIKE_KEYWORDS)
-    ]
-    suspicious_extras = sorted(set(numeric_extras) | set(score_like_extras))
-    if suspicious_extras:
-        raise ValueError(
-            f"response included numeric field(s) or field(s) named like a smuggled score, "
-            f"rating, probability, or confidence value: {suspicious_extras} -- the agent "
-            f"never accepts a score, rating, or confidence number (or word) from the model, "
-            f"under any field name"
-        )
+    _reject_suspicious_extra_fields(data, EXPECTED_FIELDS)
 
     text_fields: dict[str, str] = {}
     for key in TEXT_FIELDS:
@@ -407,30 +495,110 @@ def _parse_response(raw_text: str) -> dict:
     return {**text_fields, "uncertainty": uncertainty, **categorical_fields, **proposal_fields}
 
 
+def _parse_confirmation_response(raw_text: str) -> dict:
+    """
+    7A Iteration 2. Parses and validates the confirmation call's minimal
+    reply -- the same hard-boundary rules as _parse_response() (reject,
+    never coerce; no numbers anywhere; no smuggled score/probability
+    field, via the shared _reject_suspicious_extra_fields()), scoped to
+    the three fields this call ever asks for.
+
+    confirmation_visible_timeframe is free text -- the model transcribes
+    whatever timeframe label it actually sees on the chart. This function
+    only validates that it's present and non-empty text; it has no way to
+    know what timeframe was actually requested, so checking it against
+    that is backend/orchestrator.py's job, not this one's.
+    """
+    text = _strip_markdown_fence(raw_text)
+
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"response was not valid JSON: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError(f"response JSON was a {type(data).__name__}, not an object")
+
+    missing = CONFIRMATION_EXPECTED_FIELDS - data.keys()
+    if missing:
+        raise ValueError(f"response is missing required field(s): {sorted(missing)}")
+
+    _reject_suspicious_extra_fields(data, CONFIRMATION_EXPECTED_FIELDS)
+
+    visible_timeframe_raw = data[CONFIRMATION_VISIBLE_TIMEFRAME_FIELD]
+    if not isinstance(visible_timeframe_raw, str):
+        raise ValueError(
+            f"'{CONFIRMATION_VISIBLE_TIMEFRAME_FIELD}' must be text, got "
+            f"{type(visible_timeframe_raw).__name__}"
+        )
+    visible_timeframe = visible_timeframe_raw.strip()
+    if not visible_timeframe:
+        raise ValueError(f"'{CONFIRMATION_VISIBLE_TIMEFRAME_FIELD}' must not be empty")
+
+    direction_raw = data[CONFIRMATION_TREND_DIRECTION_FIELD]
+    if not isinstance(direction_raw, str):
+        raise ValueError(
+            f"'{CONFIRMATION_TREND_DIRECTION_FIELD}' must be text, got {type(direction_raw).__name__}"
+        )
+    direction = direction_raw.strip().upper()
+    if direction not in CONFIRMATION_TREND_DIRECTION_ALLOWED:
+        raise ValueError(
+            f"'{CONFIRMATION_TREND_DIRECTION_FIELD}' must be one of "
+            f"{sorted(CONFIRMATION_TREND_DIRECTION_ALLOWED)}, got {direction_raw!r}"
+        )
+
+    quality_raw = data[CONFIRMATION_TREND_QUALITY_FIELD]
+    if not isinstance(quality_raw, str):
+        raise ValueError(
+            f"'{CONFIRMATION_TREND_QUALITY_FIELD}' must be text, got {type(quality_raw).__name__}"
+        )
+    quality = quality_raw.strip().upper()
+    if quality not in CONFIRMATION_TREND_QUALITY_ALLOWED:
+        raise ValueError(
+            f"'{CONFIRMATION_TREND_QUALITY_FIELD}' must be one of "
+            f"{sorted(CONFIRMATION_TREND_QUALITY_ALLOWED)}, got {quality_raw!r}"
+        )
+
+    return {
+        CONFIRMATION_VISIBLE_TIMEFRAME_FIELD: visible_timeframe,
+        CONFIRMATION_TREND_DIRECTION_FIELD: direction,
+        CONFIRMATION_TREND_QUALITY_FIELD: quality,
+    }
+
+
 class TradeAgent:
     def __init__(
         self,
         model: Optional[str] = None,
         timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
         max_tokens: int = DEFAULT_MAX_TOKENS,
+        confirmation_max_tokens: int = CONFIRMATION_DEFAULT_MAX_TOKENS,
         client: Optional[object] = None,
     ):
         """
         model: Claude model id. Defaults to the CLAUDE_MODEL environment
-        variable, then "claude-sonnet-5" if unset.
+        variable, then "claude-sonnet-5" if unset. Shared by analyze() and
+        analyze_confirmation() -- both calls use the same configured model.
 
-        max_tokens: hard cap on the API response's output tokens. Stored
-        (not just passed inline to the API call) so a truncated response
-        can report the exact limit it hit.
+        max_tokens: hard cap on analyze()'s own API response's output
+        tokens. Stored (not just passed inline to the API call) so a
+        truncated response can report the exact limit it hit.
+
+        confirmation_max_tokens (7A Iteration 2): the same idea, sized for
+        analyze_confirmation()'s own much smaller response shape -- a
+        separate value on purpose, since the two calls have genuinely
+        different response sizes.
 
         client: an object with a `.messages.create(...)` method matching
         anthropic.Anthropic's interface. Exists so tests can inject a
         fake client without any real API key or network access. Normal
-        callers leave this None.
+        callers leave this None. Shared by both calls -- one TradeAgent
+        instance makes both, reusing the same underlying credentials.
         """
         self._model = model or os.getenv("CLAUDE_MODEL", "claude-sonnet-5")
         self._timeout_seconds = timeout_seconds
         self._max_tokens = max_tokens
+        self._confirmation_max_tokens = confirmation_max_tokens
         self._client = client
 
     def analyze(
@@ -575,6 +743,114 @@ class TradeAgent:
             proposal_entry=None,
             proposal_stop=None,
             proposal_target=None,
+            timestamp=None,
+            error_message=message,
+        )
+
+    def analyze_confirmation(self, capture_result: CaptureResult) -> ConfirmationAnalysisResult:
+        """
+        7A Iteration 2. A SEPARATE Claude call from analyze() -- see the
+        module docstring's Iteration 2 note for why this is a second call
+        rather than a second image folded into analyze()'s own call.
+        Never touches analyze()'s prompt files, image, or fields.
+
+        If this call fails for any reason (bad capture, API error,
+        truncation, malformed response), it fails closed and returns a
+        FAILED ConfirmationAnalysisResult -- it never retries into
+        analyze(), and analyze() is never called as a fallback.
+        """
+        if capture_result.status != CaptureStatus.SUCCESS:
+            detail = f": {capture_result.error_message}" if capture_result.error_message else "."
+            return self._failed_confirmation(
+                f"No confirmation chart to analyze -- capture status is "
+                f"{capture_result.status.value}{detail}"
+            )
+
+        try:
+            image_b64, media_type = _load_image_as_base64(capture_result.screenshot_path)
+        except OSError as exc:
+            return self._failed_confirmation(f"Could not read the confirmation screenshot file: {exc}")
+
+        try:
+            system_prompt = CONFIRMATION_SYSTEM_PROMPT_PATH.read_text(encoding="utf-8")
+            analysis_template = CONFIRMATION_ANALYSIS_PROMPT_PATH.read_text(encoding="utf-8")
+        except OSError as exc:
+            return self._failed_confirmation(f"Could not read the confirmation prompt files: {exc}")
+
+        user_prompt = analysis_template.format(
+            symbol=capture_result.symbol, timeframe=capture_result.timeframe
+        )
+
+        if self._client is not None:
+            client = self._client
+        else:
+            api_key = os.getenv("ANTHROPIC_API_KEY")
+            if not api_key:
+                return self._failed_confirmation(
+                    "ANTHROPIC_API_KEY is not set in .env. Get one at "
+                    "https://console.anthropic.com/settings/keys."
+                )
+            client = anthropic.Anthropic(api_key=api_key)
+
+        try:
+            response = client.messages.create(
+                model=self._model,
+                max_tokens=self._confirmation_max_tokens,
+                system=system_prompt,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": media_type,
+                                    "data": image_b64,
+                                },
+                            },
+                            {"type": "text", "text": user_prompt},
+                        ],
+                    }
+                ],
+                timeout=self._timeout_seconds,
+            )
+        except anthropic.APITimeoutError as exc:
+            return self._failed_confirmation(
+                f"Confirmation Claude API request timed out after {self._timeout_seconds}s: {exc}"
+            )
+        except anthropic.APIError as exc:
+            return self._failed_confirmation(f"Confirmation Claude API request failed: {exc}")
+
+        raw_text = _extract_text(response)
+
+        if getattr(response, "stop_reason", None) == "max_tokens":
+            return self._failed_confirmation(
+                f"Confirmation response was truncated: generation stopped because it hit "
+                f"the max_tokens limit ({self._confirmation_max_tokens}) before finishing "
+                f"(stop_reason='max_tokens')."
+            )
+
+        try:
+            parsed = _parse_confirmation_response(raw_text)
+        except ValueError as exc:
+            return self._failed_confirmation(f"Confirmation response could not be used: {exc}")
+
+        return ConfirmationAnalysisResult(
+            status=ConfirmationAnalysisStatus.SUCCESS,
+            visible_timeframe=parsed[CONFIRMATION_VISIBLE_TIMEFRAME_FIELD],
+            trend_direction=parsed[CONFIRMATION_TREND_DIRECTION_FIELD],
+            trend_quality=parsed[CONFIRMATION_TREND_QUALITY_FIELD],
+            timestamp=datetime.now(timezone.utc),
+            error_message=None,
+        )
+
+    def _failed_confirmation(self, message: str) -> ConfirmationAnalysisResult:
+        return ConfirmationAnalysisResult(
+            status=ConfirmationAnalysisStatus.FAILED,
+            visible_timeframe=None,
+            trend_direction=None,
+            trend_quality=None,
             timestamp=None,
             error_message=message,
         )

@@ -6,6 +6,7 @@ import type { CaptureOut } from "../api/types";
 const BASE_CAPTURE: CaptureOut = {
   id: 1,
   capture_mode: "DEMO",
+  timeframe_role: "PRIMARY",
   symbol: "EURUSD",
   timeframe: "1h",
   screenshot_path: "screenshots/demo/EURUSD_1h.png",
@@ -52,5 +53,29 @@ describe("ChartCapturePanel", () => {
 
     expect(screen.queryByText(/demo data/i)).not.toBeInTheDocument();
     expect(screen.getByText(/^live$/i)).toBeInTheDocument();
+  });
+
+  // --- 7A Iteration 2: role selection ---
+
+  it("shows a confirmation-specific empty state when role=CONFIRMATION and no capture exists", () => {
+    render(<ChartCapturePanel runId="run-1" capture={undefined} role="CONFIRMATION" />);
+
+    expect(screen.getByText(/no confirmation chart has been captured/i)).toBeInTheDocument();
+  });
+
+  it("requests the confirmation image URL when role=CONFIRMATION", () => {
+    const confirmationCapture: CaptureOut = { ...BASE_CAPTURE, id: 2, timeframe_role: "CONFIRMATION", timeframe: "4h" };
+    render(<ChartCapturePanel runId="run-1" capture={confirmationCapture} role="CONFIRMATION" />);
+
+    const image = screen.getByRole("img") as HTMLImageElement;
+    expect(image.src).toContain("/runs/run-1/screenshot");
+    expect(image.src).toContain("role=CONFIRMATION");
+  });
+
+  it("does not append a role query param for the default PRIMARY role", () => {
+    render(<ChartCapturePanel runId="run-1" capture={BASE_CAPTURE} />);
+
+    const image = screen.getByRole("img") as HTMLImageElement;
+    expect(image.src).not.toContain("role=");
   });
 });

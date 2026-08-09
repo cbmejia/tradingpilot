@@ -114,6 +114,19 @@ def test_a_normal_analysis_without_force_scenario_is_unaffected(client):
         proposal_stop=None, proposal_target=None,
         timestamp=datetime.now(timezone.utc), error_message=None,
     )
+    # 7A Iteration 2: GOOD_PARAMS's EURUSD/1h has a real confirmation
+    # fixture (4h), so the confirmation call is genuinely attempted here
+    # too -- give it a real return value rather than an unconfigured mock.
+    from agents.trade_agent import ConfirmationAnalysisResult, ConfirmationAnalysisStatus
+
+    mock_agent.analyze_confirmation.return_value = ConfirmationAnalysisResult(
+        status=ConfirmationAnalysisStatus.SUCCESS,
+        visible_timeframe="4h",
+        trend_direction="UP",
+        trend_quality="STRONG",
+        timestamp=datetime.now(timezone.utc),
+        error_message=None,
+    )
     with patch("backend.orchestrator.TradeAgent", return_value=mock_agent):
         _, response = _create_and_analyze(client)
 
@@ -122,6 +135,49 @@ def test_a_normal_analysis_without_force_scenario_is_unaffected(client):
     assert body["analyses"][0]["analysis_text"] == "Real analysis."
     audit_types = [e["event_type"] for e in body["audit_events"]]
     assert "testing_scenario_forced" not in audit_types
+
+
+@pytest.mark.parametrize(
+    "force_scenario",
+    [
+        "capture_fails",
+        "capture_stale",
+        "market_data_fails",
+        "market_data_stale",
+        "agent_fails",
+        "high_uncertainty",
+        "perfect_demo_score",
+    ],
+)
+def test_force_scenario_never_makes_an_unmocked_confirmation_call_and_reports_suppressed(
+    client, force_scenario
+):
+    """7A Iteration 2 note: the confirmation call
+    (TradeAgent.analyze_confirmation()) is a genuinely real, uncontrolled,
+    billed Claude call with no force_scenario equivalent of its own --
+    backend/orchestrator.py's run_pipeline() deliberately keeps
+    confirmation_timeframe at None whenever force_scenario is active, for
+    every single scenario, so this call is never even attempted. This is
+    the exact thing flagged as needing a regression guard: proves, for
+    every documented scenario, that (a) analyze_confirmation is never
+    called even though it's mocked and would happily return a value if it
+    were, and (b) the CROSS_TIMEFRAME_AGREEMENT guardrail reports the
+    suppression in its own distinct reason text, passing, rather than
+    looking like an unexplained N/A or a failure."""
+    mock_agent = MagicMock()
+    with patch("backend.orchestrator.TradeAgent", return_value=mock_agent):
+        run_id, response = _create_and_analyze(client, force_scenario=force_scenario)
+
+    assert response.status_code == 200
+    mock_agent.analyze_confirmation.assert_not_called()
+
+    body = response.json()
+    check = _guardrail(body, "CROSS_TIMEFRAME_AGREEMENT")
+    assert check["passed"] is True
+    assert "N/A: suppressed by force_scenario" in check["reason"]
+    # No confirmation capture row was ever written for a force_scenario run.
+    assert len(body["captures"]) == 1
+    assert body["captures"][0]["timeframe_role"] == "PRIMARY"
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +197,11 @@ def test_scenario_1_capture_fails(client):
     assert "TESTING" in body["captures"][0]["error_message"]
     mock_agent.analyze.assert_not_called()
     assert body["analyses"][0]["status"] == "FAILED"
-    assert len(body["guardrail_results"]) == 11
+    # 12, not 11: 7A Iteration 2 added CROSS_TIMEFRAME_AGREEMENT as a
+    # twelfth rule -- it reports N/A/passed here since force_scenario
+    # suppresses the confirmation path entirely (see
+    # backend/orchestrator.py's own note on why).
+    assert len(body["guardrail_results"]) == 12
     assert _guardrail(body, "CAPTURE_SUCCEEDED")["passed"] is False
     assert body["guardrail_outcome"] == "BLOCKED"
 

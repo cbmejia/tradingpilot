@@ -78,12 +78,21 @@
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from agents.trade_agent import AgentAnalysisResult, AgentAnalysisStatus, TradeAgent, TradeParams
+from agents.trade_agent import (
+    AgentAnalysisResult,
+    AgentAnalysisStatus,
+    ConfirmationAnalysisResult,
+    ConfirmationAnalysisStatus,
+    TradeAgent,
+    TradeParams,
+)
 from capture.base import CaptureResult, CaptureStatus
 from capture.manager import CaptureManager
 from database import crud
@@ -119,6 +128,56 @@ FORCE_SCENARIOS: frozenset[str] = frozenset(
 # LIVE. See capture/demo_provider.py and tools/market_data.py's own
 # CHART_VARIANT_* constants for the two allowed values.
 DEMO_CHART_VARIANTS: frozenset[str] = frozenset({"unreadable_chart", "readable_chart"})
+
+# 7A Iteration 2 -- multi-timeframe capture + cross-timeframe agreement.
+# A run's primary timeframe (run.timeframe, unchanged from before this
+# iteration) is paired with exactly one CONFIRMATION timeframe: the next
+# rung up this fixed ladder. Chosen over a user-configurable set for the
+# same reason a fixed set of allowed timeframes already exists in
+# backend/schemas.py -- one deterministic, always-the-same-answer rule,
+# no new UI configuration needed. If the primary is already at the top of
+# the ladder (or isn't a recognized rung at all -- shouldn't happen, since
+# backend/schemas.py's ALLOWED_TIMEFRAMES already restricts what a client
+# can submit, but this function doesn't trust that from a distance), there
+# is no confirmation timeframe -- N/A, not a failure; see
+# guardrails/rules.py's _cross_timeframe_agreement() for how N/A is scored.
+TIMEFRAME_LADDER: tuple[str, ...] = ("1m", "5m", "15m", "30m", "1h", "4h", "1d", "1w")
+
+
+def _confirmation_timeframe(primary_timeframe: str) -> Optional[str]:
+    """The next rung up TIMEFRAME_LADDER, or None if primary_timeframe is
+    already at the top (or isn't a recognized rung at all)."""
+    try:
+        index = TIMEFRAME_LADDER.index(primary_timeframe.strip().lower())
+    except ValueError:
+        return None
+    if index + 1 >= len(TIMEFRAME_LADDER):
+        return None
+    return TIMEFRAME_LADDER[index + 1]
+
+
+def _hash_file(path: Optional[str]) -> Optional[str]:
+    """
+    SHA-256 of a screenshot file's actual bytes -- used to detect a real
+    failure mode that would otherwise be invisible: if the TradingView
+    timeframe switch silently doesn't take, the confirmation capture is
+    byte-identical to the primary one, the two "independent" reads would
+    trivially agree, and CROSS_TIMEFRAME_AGREEMENT would pass on zero
+    actual information. Computed here, in the orchestrator (which already
+    has both screenshot paths in hand right after capturing them), not in
+    guardrails/rules.py -- that module stays a pure function over
+    explicit inputs, the same "no ambient state" principle CAPTURE_FRESH/
+    MARKET_DATA_FRESH already apply to `now`. Returns None (never raises)
+    if the file can't be read -- the caller treats that as "can't compare,"
+    not as a hash collision.
+    """
+    if not path:
+        return None
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return None
+
 
 # How far in the past a "stale" forced timestamp is set -- comfortably
 # past any sane CAPTURE_MAX_AGE_SECONDS/MARKET_DATA_MAX_AGE_SECONDS
@@ -347,6 +406,21 @@ def _market_data_summary(result: MarketQuote) -> str:
     return f"Market data fetch failed ({result.mode.value} mode): {result.error_message}"
 
 
+def _confirmation_capture_summary(result: CaptureResult) -> str:
+    if result.status == CaptureStatus.SUCCESS:
+        return f"Confirmation chart capture succeeded ({result.mode.value} mode, {result.timeframe})."
+    return f"Confirmation chart capture failed ({result.mode.value} mode): {result.error_message}"
+
+
+def _confirmation_analysis_summary(result: ConfirmationAnalysisResult) -> str:
+    if result.status == ConfirmationAnalysisStatus.SUCCESS:
+        return (
+            f"Confirmation analysis succeeded. visible_timeframe={result.visible_timeframe!r}, "
+            f"trend_direction={result.trend_direction}, trend_quality={result.trend_quality}."
+        )
+    return f"Confirmation analysis failed: {result.error_message}"
+
+
 def _persist_agent_proposal(session: Session, run_id: str, agent_result: AgentAnalysisResult) -> str:
     """
     7A Iteration 1. Called only for a SUCCESSFUL agent analysis -- the
@@ -523,6 +597,7 @@ def run_pipeline(
         session,
         run_id=run_id,
         capture_mode=capture_result.mode.value,
+        timeframe_role="PRIMARY",
         symbol=capture_result.symbol,
         timeframe=capture_result.timeframe,
         status=capture_result.status.value,
@@ -536,6 +611,101 @@ def run_pipeline(
         event_type="capture_finished",
         event_message=_capture_summary(capture_result),
     )
+
+    # --- Step 4b (7A Iteration 2): confirmation chart capture ---
+    # Suppressed entirely whenever force_scenario is active -- Milestone
+    # 12's testing affordance exists specifically so guardrail behavior
+    # can be proven for free and deterministically, and the confirmation
+    # stage makes a genuinely real (uncontrolled, billed) Claude call via
+    # analyze_confirmation() below with no force_scenario equivalent of
+    # its own. Extending force_scenario to also cover the confirmation
+    # path was out of this iteration's scope, so the simplest, safest
+    # rule is: force_scenario and multi-timeframe confirmation never both
+    # run in the same pipeline execution. Treated identically to N/A (top
+    # of the ladder) everywhere downstream -- confirmation_timeframe is
+    # simply None either way -- with only the audit message text
+    # distinguishing which reason applies.
+    #
+    # Otherwise independent of the primary capture's own outcome: a
+    # failed primary capture already guarantees BLOCKED via
+    # CAPTURE_SUCCEEDED, so a confirmation attempt in that case can't
+    # change the outcome, but it costs nothing to still attempt it for a
+    # complete audit trail (capture doesn't touch Alpha Vantage's quota --
+    # only market data does).
+    confirmation_timeframe = None if force_scenario is not None else _confirmation_timeframe(run.timeframe)
+    if confirmation_timeframe is not None:
+        crud.add_audit_event(
+            session,
+            run_id=run_id,
+            event_type="confirmation_capture_started",
+            event_message=f"Confirmation chart capture started ({confirmation_timeframe}).",
+        )
+        confirmation_capture_result = capture_manager.capture(
+            run.symbol, confirmation_timeframe, chart_variant=chart_variant
+        )
+        crud.add_capture(
+            session,
+            run_id=run_id,
+            capture_mode=confirmation_capture_result.mode.value,
+            timeframe_role="CONFIRMATION",
+            symbol=confirmation_capture_result.symbol,
+            timeframe=confirmation_capture_result.timeframe,
+            status=confirmation_capture_result.status.value,
+            screenshot_path=confirmation_capture_result.screenshot_path,
+            captured_at=confirmation_capture_result.captured_at,
+            error_message=confirmation_capture_result.error_message,
+        )
+        crud.add_audit_event(
+            session,
+            run_id=run_id,
+            event_type="confirmation_capture_finished",
+            event_message=_confirmation_capture_summary(confirmation_capture_result),
+        )
+    else:
+        confirmation_capture_result = None
+        if force_scenario is not None:
+            skip_reason = (
+                f"Confirmation capture skipped: force_scenario={force_scenario!r} is active for "
+                f"this run -- 7A Iteration 2's multi-timeframe path is not exercised by Milestone "
+                f"12's testing affordance. This is not a failure."
+            )
+        else:
+            skip_reason = (
+                f"Confirmation capture skipped: {run.timeframe} is already at the top of the "
+                f"timeframe ladder ({', '.join(TIMEFRAME_LADDER)}) -- no confirmation timeframe "
+                f"exists. N/A, not a failure."
+            )
+        crud.add_audit_event(
+            session,
+            run_id=run_id,
+            event_type="confirmation_capture_skipped",
+            event_message=skip_reason,
+        )
+
+    # The hash comparison itself: computed here (this is the one place
+    # that already has both real screenshot paths in hand), fed into
+    # guardrails/rules.py as a plain boolean below -- see _hash_file()'s
+    # own docstring for why this check exists at all.
+    confirmation_capture_matches_primary_hash = False
+    if (
+        confirmation_capture_result is not None
+        and confirmation_capture_result.status == CaptureStatus.SUCCESS
+        and capture_result.status == CaptureStatus.SUCCESS
+    ):
+        primary_hash = _hash_file(capture_result.screenshot_path)
+        confirmation_hash = _hash_file(confirmation_capture_result.screenshot_path)
+        if primary_hash is not None and primary_hash == confirmation_hash:
+            confirmation_capture_matches_primary_hash = True
+            crud.add_audit_event(
+                session,
+                run_id=run_id,
+                event_type="confirmation_capture_identical_to_primary",
+                event_message=(
+                    "The confirmation capture is byte-identical to the primary capture "
+                    "(SHA-256 hash match) -- the timeframe switch may not have taken "
+                    "effect. Cross-timeframe agreement cannot be confirmed from this pair."
+                ),
+            )
 
     # --- Step 5: market data (independent of capture -- always attempted) ---
     crud.add_audit_event(
@@ -570,6 +740,14 @@ def run_pipeline(
         event_message=_market_data_summary(market_data_result),
     )
 
+    # One TradeAgent instance, reused for both the primary analyze() call
+    # below and the confirmation analyze_confirmation() call further down
+    # (7A Iteration 2) -- same underlying credentials/model, genuinely
+    # separate calls. Constructing it makes no API call and is always
+    # safe/free, so it happens unconditionally here rather than being
+    # duplicated inside each stage's own gate.
+    agent = TradeAgent()
+
     # --- Steps 6-7: agent analysis -- only if BOTH inputs are usable ---
     # Either way, exactly one AgentAnalysis row is written -- SUCCESS,
     # FAILED (Claude was called and rejected/errored), or FAILED (never
@@ -590,7 +768,7 @@ def run_pipeline(
         if force_scenario is not None:
             agent_result = _forced_agent_result(force_scenario)
         else:
-            agent_result = TradeAgent().analyze(capture_result, market_data_result, trade_params)
+            agent_result = agent.analyze(capture_result, market_data_result, trade_params)
         if agent_result.status == AgentAnalysisStatus.SUCCESS:
             crud.add_agent_analysis(
                 session,
@@ -639,6 +817,70 @@ def run_pipeline(
             ),
         )
 
+    # --- Step 7b (7A Iteration 2): confirmation analysis ---
+    # A SEPARATE Claude call from the primary agent_result above -- see
+    # agents/trade_agent.py's TradeAgent.analyze_confirmation() and its
+    # module docstring for why this is never folded into the primary call
+    # as a second image. Gated on the CONFIRMATION capture's own success,
+    # independent of the primary capture/market-data/agent outcome --
+    # capture and analysis stages stay independent of each other the same
+    # way the primary capture and market-data stages already are. If this
+    # call fails, it fails closed (see guardrails/rules.py's
+    # _cross_timeframe_agreement()) -- it never retries into the primary
+    # call, and the primary call is never used as a fallback for it.
+    if confirmation_timeframe is not None:
+        if confirmation_capture_result is not None and confirmation_capture_result.status == CaptureStatus.SUCCESS:
+            crud.add_audit_event(
+                session,
+                run_id=run_id,
+                event_type="confirmation_analysis_started",
+                event_message="Confirmation analysis started.",
+            )
+            confirmation_agent_result = agent.analyze_confirmation(confirmation_capture_result)
+            if confirmation_agent_result.status == ConfirmationAnalysisStatus.SUCCESS:
+                crud.add_confirmation_analysis(
+                    session,
+                    run_id=run_id,
+                    visible_timeframe=confirmation_agent_result.visible_timeframe,
+                    trend_direction=confirmation_agent_result.trend_direction,
+                    trend_quality=confirmation_agent_result.trend_quality,
+                )
+            else:
+                crud.add_failed_confirmation_analysis(
+                    session, run_id=run_id, error_message=confirmation_agent_result.error_message
+                )
+            crud.add_audit_event(
+                session,
+                run_id=run_id,
+                event_type="confirmation_analysis_finished",
+                event_message=_confirmation_analysis_summary(confirmation_agent_result),
+            )
+        else:
+            confirmation_agent_result = ConfirmationAnalysisResult(
+                status=ConfirmationAnalysisStatus.FAILED,
+                visible_timeframe=None,
+                trend_direction=None,
+                trend_quality=None,
+                timestamp=None,
+                error_message=(
+                    "Confirmation analysis skipped -- confirmation capture did not succeed."
+                ),
+            )
+            crud.add_failed_confirmation_analysis(
+                session, run_id=run_id, error_message=confirmation_agent_result.error_message
+            )
+            crud.add_audit_event(
+                session,
+                run_id=run_id,
+                event_type="confirmation_analysis_skipped",
+                event_message=(
+                    "Confirmation analysis skipped: confirmation capture did not succeed. "
+                    "No Claude request was made."
+                ),
+            )
+    else:
+        confirmation_agent_result = None  # N/A -- no row written, see ConfirmationAnalysis's own docstring
+
     # --- Step 8: evaluation -- only if the agent succeeded ---
     # Same shape as above: exactly one Evaluation row is always written.
     if agent_result.status == AgentAnalysisStatus.SUCCESS:
@@ -686,7 +928,16 @@ def run_pipeline(
         session, run_id=run_id, event_type="guardrails_started", event_message="Guardrail checks started."
     )
     report = evaluate_guardrails(
-        capture_result, market_data_result, agent_result, evaluation_result, trade_params
+        capture_result,
+        market_data_result,
+        agent_result,
+        evaluation_result,
+        trade_params,
+        confirmation_timeframe=confirmation_timeframe,
+        confirmation_capture_result=confirmation_capture_result,
+        confirmation_agent_result=confirmation_agent_result,
+        confirmation_capture_matches_primary_hash=confirmation_capture_matches_primary_hash,
+        force_scenario_active=force_scenario is not None,
     )
     for check in report.checks:
         crud.add_guardrail_result(

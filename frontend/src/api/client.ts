@@ -122,9 +122,14 @@ export function acceptProposal(runId: string): Promise<AcceptProposalResponse> {
 
 /** The URL for a run's captured chart image (GET /runs/{id}/screenshot).
  * Not fetched through request() above -- it's used directly as an <img>
- * src, so the browser makes this request itself. */
-export function screenshotUrl(runId: string): string {
-  return `${API_BASE_URL}/runs/${encodeURIComponent(runId)}/screenshot`;
+ * src, so the browser makes this request itself.
+ *
+ * role (7A Iteration 2): "PRIMARY" (the default, reproducing the exact
+ * original single-capture URL) or "CONFIRMATION", selecting which of a
+ * run's up to two captures to fetch. */
+export function screenshotUrl(runId: string, role: "PRIMARY" | "CONFIRMATION" = "PRIMARY"): string {
+  const base = `${API_BASE_URL}/runs/${encodeURIComponent(runId)}/screenshot`;
+  return role === "PRIMARY" ? base : `${base}?role=${encodeURIComponent(role)}`;
 }
 
 export { API_BASE_URL };

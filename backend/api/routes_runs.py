@@ -213,15 +213,26 @@ def _resolve_screenshot_path(capture: Capture) -> Optional[Path]:
 
 
 @router.get("/{run_id}/screenshot")
-def get_run_screenshot(run_id: str, session: Session = Depends(get_session)) -> FileResponse:
+def get_run_screenshot(
+    run_id: str,
+    role: str = Query(default="PRIMARY"),
+    session: Session = Depends(get_session),
+) -> FileResponse:
     """
     Serves the chart image for one run's own capture -- and only that
-    run's capture. There is no path, filename, or directory parameter
-    anywhere on this endpoint; the file to serve is derived entirely from
-    run_id by looking up that run's Capture row. A client cannot ask for
-    any file but the one this run actually captured, which rules out path
-    traversal as a class of bug here rather than merely guarding against
-    it.
+    run's capture. There is no path or filename parameter anywhere on this
+    endpoint; the file to serve is derived entirely from run_id (plus
+    role, below) by looking up that run's Capture row(s). A client cannot
+    ask for any file but the one this run actually captured, which rules
+    out path traversal as a class of bug here rather than merely guarding
+    against it.
+
+    role (7A Iteration 2): "PRIMARY" (the default -- reproduces the exact
+    original single-capture behavior for every caller that doesn't pass
+    it) or "CONFIRMATION", selecting which of a run's up to two captures
+    to serve. Anything else is a 422, the same "reject, don't guess"
+    pattern every other validated value in this codebase already follows
+    -- never silently falls back to PRIMARY for an unrecognized value.
 
     Milestone 11 prerequisite: Capture.screenshot_path is an absolute
     path on the server's own filesystem -- meaningless to a browser on
@@ -232,18 +243,27 @@ def get_run_screenshot(run_id: str, session: Session = Depends(get_session)) -> 
     request is checked against the run it claims to belong to.
 
     404, never 500, for every way there can be "no image right now":
-    the run doesn't exist, the run has no capture yet, the capture
-    failed, the stored path resolves outside screenshots/, or the file
-    is simply missing from disk. All of these are legitimate states this
-    application can be in, not server errors.
+    the run doesn't exist, the run has no capture of the requested role
+    yet, the capture failed, the stored path resolves outside
+    screenshots/, or the file is simply missing from disk. All of these
+    are legitimate states this application can be in, not server errors.
     """
+    role_normalized = role.strip().upper()
+    if role_normalized not in ("PRIMARY", "CONFIRMATION"):
+        raise HTTPException(
+            status_code=422, detail="role must be 'PRIMARY' or 'CONFIRMATION'"
+        )
+
     run = crud.get_run(session, run_id)
     if run is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
-    capture = run.captures[0] if run.captures else None
+    capture = next((c for c in run.captures if c.timeframe_role == role_normalized), None)
     if capture is None:
-        raise HTTPException(status_code=404, detail=f"Run {run_id} has no chart capture yet")
+        raise HTTPException(
+            status_code=404,
+            detail=f"Run {run_id} has no {role_normalized.lower()} chart capture",
+        )
 
     if capture.status != "SUCCESS":
         detail = capture.error_message or "no error message provided"

@@ -15,6 +15,7 @@ import httpx
 
 from agents.trade_agent import (
     AgentAnalysisStatus,
+    ConfirmationAnalysisStatus,
     TradeAgent,
     TradeParams,
     analyze,
@@ -848,3 +849,250 @@ def test_module_level_analyze_function_delegates_correctly():
 
     assert result.status == AgentAnalysisStatus.FAILED
     assert "No chart to analyze" in result.error_message
+
+
+# ---------------------------------------------------------------------------
+# 7A Iteration 2 -- analyze_confirmation(), a SEPARATE Claude call from
+# analyze(). Two things this section has to prove: (1) analyze()'s own
+# call is completely unchanged by analyze_confirmation() existing at all
+# (one image, the same prompt, the same fields); (2) analyze_confirmation()
+# itself follows the identical hard-boundary enforcement style as analyze()
+# -- reject, never coerce -- scoped to its own three-field response.
+# ---------------------------------------------------------------------------
+
+CONFIRMATION_WELL_FORMED_RESPONSE = json.dumps(
+    {
+        "confirmation_visible_timeframe": "4h",
+        "confirmation_trend_direction": "UP",
+        "confirmation_trend_quality": "STRONG",
+    }
+)
+
+
+def test_primary_call_payload_is_unchanged_by_the_existence_of_analyze_confirmation():
+    """The architectural guarantee itself: analyze() still makes exactly
+    one Claude call, with exactly one image and the same rendered
+    analysis_prompt.md template, regardless of analyze_confirmation()
+    existing on the same class."""
+    client = _fake_client(WELL_FORMED_RESPONSE)
+
+    TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert client.messages.create.call_count == 1
+    _, kwargs = client.messages.create.call_args
+    assert kwargs["max_tokens"] == 2048  # DEFAULT_MAX_TOKENS, unchanged
+
+    content = kwargs["messages"][0]["content"]
+    assert len(content) == 2  # exactly one image block, one text block
+    image_blocks = [b for b in content if b["type"] == "image"]
+    assert len(image_blocks) == 1
+    text_block = next(b for b in content if b["type"] == "text")
+    assert "Analyze the attached chart screenshot" in text_block["text"]  # analysis_prompt.md's own opening
+
+
+def test_analyze_confirmation_makes_its_own_separate_call_with_one_image():
+    client = _fake_client(CONFIRMATION_WELL_FORMED_RESPONSE)
+    agent = TradeAgent(client=client)
+
+    result = agent.analyze_confirmation(_successful_capture(timeframe="4h"))
+
+    assert result.status == ConfirmationAnalysisStatus.SUCCESS
+    assert result.visible_timeframe == "4h"
+    assert result.trend_direction == "UP"
+    assert result.trend_quality == "STRONG"
+
+    assert client.messages.create.call_count == 1
+    _, kwargs = client.messages.create.call_args
+    assert kwargs["max_tokens"] == 256  # CONFIRMATION_DEFAULT_MAX_TOKENS, not analyze()'s 2048
+    content = kwargs["messages"][0]["content"]
+    assert len(content) == 2
+    image_blocks = [b for b in content if b["type"] == "image"]
+    assert len(image_blocks) == 1
+
+
+def test_analyze_and_analyze_confirmation_are_two_independent_calls_on_one_agent():
+    """One TradeAgent instance making both calls -- confirms they're
+    genuinely separate API calls, not one call reused or duplicated."""
+    client = MagicMock()
+    client.messages.create.side_effect = [
+        SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=WELL_FORMED_RESPONSE)], stop_reason="end_turn"
+        ),
+        SimpleNamespace(
+            content=[SimpleNamespace(type="text", text=CONFIRMATION_WELL_FORMED_RESPONSE)],
+            stop_reason="end_turn",
+        ),
+    ]
+    agent = TradeAgent(client=client)
+
+    primary_result = agent.analyze(_successful_capture(), _successful_market_data())
+    confirmation_result = agent.analyze_confirmation(_successful_capture(timeframe="4h"))
+
+    assert primary_result.status == AgentAnalysisStatus.SUCCESS
+    assert confirmation_result.status == ConfirmationAnalysisStatus.SUCCESS
+    assert client.messages.create.call_count == 2
+
+
+def test_analyze_confirmation_failed_capture_never_calls_the_api():
+    client = _fake_client(CONFIRMATION_WELL_FORMED_RESPONSE)
+    bad_capture = _successful_capture(
+        status=CaptureStatus.FAILED, screenshot_path=None, error_message="No fixture for EURUSD 4h"
+    )
+
+    result = TradeAgent(client=client).analyze_confirmation(bad_capture)
+
+    assert result.status == ConfirmationAnalysisStatus.FAILED
+    assert "No confirmation chart to analyze" in result.error_message
+    client.messages.create.assert_not_called()
+
+
+def test_analyze_confirmation_never_falls_back_to_the_primary_call_on_failure():
+    """If the confirmation call fails, it fails closed -- it never retries
+    into analyze() as a fallback."""
+    request = httpx.Request("POST", "https://api.anthropic.com/v1/messages")
+    client = _fake_client(
+        side_effect=anthropic.APIConnectionError(message="connection reset", request=request)
+    )
+
+    result = TradeAgent(client=client).analyze_confirmation(_successful_capture(timeframe="4h"))
+
+    assert result.status == ConfirmationAnalysisStatus.FAILED
+    assert "connection reset" in result.error_message
+    # Exactly one call was attempted (the confirmation one) -- no second,
+    # different call was made as a fallback.
+    assert client.messages.create.call_count == 1
+
+
+def test_analyze_confirmation_response_that_is_not_json_returns_failed():
+    client = _fake_client("Sure, this looks like a 4h uptrend chart.")
+
+    result = TradeAgent(client=client).analyze_confirmation(_successful_capture(timeframe="4h"))
+
+    assert result.status == ConfirmationAnalysisStatus.FAILED
+    assert result.visible_timeframe is None
+
+
+def test_analyze_confirmation_missing_field_returns_failed():
+    payload = json.loads(CONFIRMATION_WELL_FORMED_RESPONSE)
+    del payload["confirmation_trend_quality"]
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze_confirmation(_successful_capture(timeframe="4h"))
+
+    assert result.status == ConfirmationAnalysisStatus.FAILED
+    assert "confirmation_trend_quality" in result.error_message
+
+
+def test_analyze_confirmation_out_of_set_trend_direction_returns_failed_not_coerced():
+    payload = json.loads(CONFIRMATION_WELL_FORMED_RESPONSE)
+    payload["confirmation_trend_direction"] = "NORTH"
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze_confirmation(_successful_capture(timeframe="4h"))
+
+    assert result.status == ConfirmationAnalysisStatus.FAILED
+    assert result.trend_direction is None
+
+
+def test_analyze_confirmation_numeric_trend_quality_is_rejected():
+    payload = json.loads(CONFIRMATION_WELL_FORMED_RESPONSE)
+    payload["confirmation_trend_quality"] = 20
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze_confirmation(_successful_capture(timeframe="4h"))
+
+    assert result.status == ConfirmationAnalysisStatus.FAILED
+    assert result.trend_quality is None
+
+
+def test_analyze_confirmation_numeric_visible_timeframe_is_rejected():
+    payload = json.loads(CONFIRMATION_WELL_FORMED_RESPONSE)
+    payload["confirmation_visible_timeframe"] = 4
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze_confirmation(_successful_capture(timeframe="4h"))
+
+    assert result.status == ConfirmationAnalysisStatus.FAILED
+
+
+def test_analyze_confirmation_empty_visible_timeframe_is_rejected():
+    payload = json.loads(CONFIRMATION_WELL_FORMED_RESPONSE)
+    payload["confirmation_visible_timeframe"] = "   "
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze_confirmation(_successful_capture(timeframe="4h"))
+
+    assert result.status == ConfirmationAnalysisStatus.FAILED
+
+
+def test_analyze_confirmation_extra_probability_field_is_rejected_even_as_a_string():
+    """Same shared enforcement as the primary call -- a probability/
+    confidence-named field is rejected whatever it's named, whatever type
+    it carries, even in this much smaller response shape."""
+    payload = json.loads(CONFIRMATION_WELL_FORMED_RESPONSE)
+    payload["confidence"] = "high"
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze_confirmation(_successful_capture(timeframe="4h"))
+
+    assert result.status == ConfirmationAnalysisStatus.FAILED
+
+
+def test_analyze_confirmation_extra_numeric_field_is_rejected():
+    payload = json.loads(CONFIRMATION_WELL_FORMED_RESPONSE)
+    payload["certainty_score"] = 0.9
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze_confirmation(_successful_capture(timeframe="4h"))
+
+    assert result.status == ConfirmationAnalysisStatus.FAILED
+
+
+def test_analyze_confirmation_trend_direction_is_normalized_to_uppercase():
+    payload = json.loads(CONFIRMATION_WELL_FORMED_RESPONSE)
+    payload["confirmation_trend_direction"] = "up"
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze_confirmation(_successful_capture(timeframe="4h"))
+
+    assert result.status == ConfirmationAnalysisStatus.SUCCESS
+    assert result.trend_direction == "UP"
+
+
+def test_analyze_confirmation_truncated_response_is_reported_as_truncation():
+    truncated = '{\n  "confirmation_visible_timeframe": "4h",\n  "confirmation_trend_dir'
+    client = _fake_client(truncated, stop_reason="max_tokens")
+
+    result = TradeAgent(client=client).analyze_confirmation(_successful_capture(timeframe="4h"))
+
+    assert result.status == ConfirmationAnalysisStatus.FAILED
+    assert "truncated" in result.error_message.lower()
+    assert "256" in result.error_message  # CONFIRMATION_DEFAULT_MAX_TOKENS, the actual configured limit
+
+
+def test_analyze_confirmation_missing_api_key_returns_failed_without_calling_anything(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+    result = TradeAgent().analyze_confirmation(_successful_capture(timeframe="4h"))
+
+    assert result.status == ConfirmationAnalysisStatus.FAILED
+    assert "ANTHROPIC_API_KEY" in result.error_message
+
+
+def test_analyze_confirmation_timestamp_is_timezone_aware_utc_on_success():
+    client = _fake_client(CONFIRMATION_WELL_FORMED_RESPONSE)
+
+    result = TradeAgent(client=client).analyze_confirmation(_successful_capture(timeframe="4h"))
+
+    assert result.timestamp is not None
+    assert result.timestamp.tzinfo is not None
+    assert result.timestamp.utcoffset() == timedelta(0)
+
+
+def test_analyze_confirmation_timestamp_is_none_on_failure():
+    bad_capture = _successful_capture(status=CaptureStatus.FAILED, screenshot_path=None)
+
+    result = TradeAgent().analyze_confirmation(bad_capture)
+
+    assert result.status == ConfirmationAnalysisStatus.FAILED
+    assert result.timestamp is None

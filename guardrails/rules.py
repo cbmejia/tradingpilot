@@ -36,7 +36,13 @@ from typing import Optional
 
 from dotenv import load_dotenv
 
-from agents.trade_agent import AgentAnalysisResult, AgentAnalysisStatus, TradeParams
+from agents.trade_agent import (
+    AgentAnalysisResult,
+    AgentAnalysisStatus,
+    ConfirmationAnalysisResult,
+    ConfirmationAnalysisStatus,
+    TradeParams,
+)
 from capture.base import CaptureMode, CaptureResult, CaptureStatus
 from evals.trade_evaluator import EvaluationResult, EvaluationStatus, compute_risk_reward
 from tools.market_data import MarketDataMode, MarketDataStatus, MarketQuote
@@ -230,6 +236,143 @@ def _synthetic_data(
     return True, "Both chart capture and market data are LIVE-sourced -- not synthetic."
 
 
+def _cross_timeframe_agreement(
+    primary_agent_analysis: AgentAnalysisResult,
+    confirmation_timeframe: Optional[str],
+    confirmation_capture_result: Optional[CaptureResult],
+    confirmation_agent_result: Optional[ConfirmationAnalysisResult],
+    confirmation_capture_matches_primary_hash: bool,
+    force_scenario_active: bool = False,
+) -> tuple[bool, str]:
+    """
+    7A Iteration 2. Orchestrator-derived, never agent-stated: the
+    confirmation call (agents/trade_agent.py's TradeAgent.
+    analyze_confirmation(), a SEPARATE Claude call from the primary
+    analyze()) only ever reports its OWN trend_direction/trend_quality for
+    the confirmation chart -- this function is the one place that decides
+    whether that agrees with the primary read. The agent never states
+    "agreement" itself, the same reason 7A Iteration 1's proposal
+    coherence is derived here-in-spirit (backend/orchestrator.py, via
+    compute_risk_reward()) rather than trusted from the model.
+
+    Fails closed in every case where agreement genuinely cannot be
+    confirmed -- a real disagreement, a failed confirmation capture, an
+    identical-hash capture (the timeframe switch may not have taken
+    effect), a visible-timeframe mismatch, or either side being
+    SIDEWAYS/UNCLEAR must never look the same as a real, confirmed
+    agreement. The two exceptions are both N/A, but for genuinely
+    different reasons, and are reported with genuinely different reason
+    text -- never collapsed into one generic "N/A" string: the primary
+    timeframe already being at the top of the fixed ladder (nothing to
+    compare against, structurally), vs. a Milestone 12 force_scenario run
+    deliberately never exercising the confirmation path at all (see
+    backend/orchestrator.py's run_pipeline() docstring). Both pass rather
+    than penalizing a run for a reason that has nothing to do with its own
+    chart.
+
+    Every FAILING branch below also gets its own distinct reason text, not
+    shared with any other branch -- in particular, "primary read
+    non-directional" and "confirmation read non-directional" are reported
+    separately (checked in that order; if both sides are non-directional,
+    the primary-side reason wins, since that's the more fundamental
+    problem) rather than the earlier "X and/or Y is not directional"
+    phrasing, which made it impossible to tell which side actually failed
+    without reading raw category values out of the message by hand.
+
+    confirmation_capture_matches_primary_hash is computed by
+    backend/orchestrator.py (which already has both screenshot paths in
+    hand right after capturing them), not here -- this function stays a
+    pure comparison over its inputs, the same "no ambient state, only
+    explicit parameters" principle CAPTURE_FRESH/MARKET_DATA_FRESH already
+    use for `now`.
+
+    force_scenario_active: True whenever backend/orchestrator.py's
+    run_pipeline() is running under a Milestone 12 force_scenario -- see
+    that function's own module docstring for why the confirmation path is
+    never exercised in that case. Only ever affects this function's
+    behavior when confirmation_timeframe is None (which the orchestrator
+    guarantees whenever force_scenario is active); otherwise ignored.
+    """
+    if confirmation_timeframe is None:
+        if force_scenario_active:
+            return True, (
+                "N/A: suppressed by force_scenario -- this run's pipeline was deliberately "
+                "altered by a Milestone 12 testing scenario, which never exercises 7A "
+                "Iteration 2's multi-timeframe confirmation path. This is not a failure."
+            )
+        return True, (
+            "N/A: primary at top of ladder -- the primary timeframe is already at the top "
+            "of the fixed ladder; no confirmation timeframe exists to compare against."
+        )
+
+    if confirmation_capture_result is None or confirmation_capture_result.status != CaptureStatus.SUCCESS:
+        detail = (
+            f": {confirmation_capture_result.error_message}"
+            if confirmation_capture_result and confirmation_capture_result.error_message
+            else "."
+        )
+        return False, (
+            f"Confirmation capture failed{detail} Cross-timeframe agreement cannot be "
+            f"confirmed."
+        )
+
+    if confirmation_capture_matches_primary_hash:
+        return False, (
+            "Identical image hash: the confirmation capture is byte-identical to the "
+            "primary capture, suggesting the timeframe switch did not actually take "
+            "effect. Cross-timeframe agreement cannot be confirmed."
+        )
+
+    if confirmation_agent_result is None or confirmation_agent_result.status != ConfirmationAnalysisStatus.SUCCESS:
+        detail = (
+            f": {confirmation_agent_result.error_message}"
+            if confirmation_agent_result and confirmation_agent_result.error_message
+            else "."
+        )
+        return False, (
+            f"Confirmation analysis did not succeed{detail} Cross-timeframe agreement "
+            f"cannot be confirmed."
+        )
+
+    visible = (confirmation_agent_result.visible_timeframe or "").strip().lower()
+    if visible != confirmation_timeframe.strip().lower():
+        return False, (
+            f"Timeframe echo mismatch: the confirmation call reported a visible timeframe "
+            f"of {confirmation_agent_result.visible_timeframe!r}, which does not match the "
+            f"requested confirmation timeframe {confirmation_timeframe!r}. Cross-timeframe "
+            f"agreement cannot be confirmed."
+        )
+
+    if primary_agent_analysis.status != AgentAnalysisStatus.SUCCESS:
+        return False, "Primary analysis did not succeed. Cross-timeframe agreement cannot be confirmed."
+
+    primary_direction = primary_agent_analysis.trend_direction
+    confirmation_direction = confirmation_agent_result.trend_direction
+
+    if primary_direction in ("SIDEWAYS", "UNCLEAR"):
+        return False, (
+            f"Primary read non-directional: primary trend is {primary_direction}. "
+            f"Cross-timeframe agreement cannot be confirmed."
+        )
+
+    if confirmation_direction in ("SIDEWAYS", "UNCLEAR"):
+        return False, (
+            f"Confirmation read non-directional: confirmation trend is "
+            f"{confirmation_direction}. Cross-timeframe agreement cannot be confirmed."
+        )
+
+    if primary_direction == confirmation_direction:
+        return True, (
+            f"Primary trend ({primary_direction}) and confirmation trend "
+            f"({confirmation_direction}) agree."
+        )
+
+    return False, (
+        f"Primary trend ({primary_direction}) and confirmation trend "
+        f"({confirmation_direction}) disagree."
+    )
+
+
 # Rules whose failure means there is nothing meaningful to review -- the
 # pipeline itself didn't produce usable output. Any failure here forces
 # BLOCKED, regardless of what any other rule says.
@@ -255,6 +398,7 @@ REVIEW_FORCING_RULES = frozenset(
         "UNCERTAINTY_ACCEPTABLE",
         "SCORE_THRESHOLD",
         "SYNTHETIC_DATA",
+        "CROSS_TIMEFRAME_AGREEMENT",
     }
 )
 
@@ -306,9 +450,14 @@ def evaluate_guardrails(
     market_data_max_age_seconds: Optional[float] = None,
     min_risk_reward: Optional[float] = None,
     min_total_score: Optional[int] = None,
+    confirmation_timeframe: Optional[str] = None,
+    confirmation_capture_result: Optional[CaptureResult] = None,
+    confirmation_agent_result: Optional[ConfirmationAnalysisResult] = None,
+    confirmation_capture_matches_primary_hash: bool = False,
+    force_scenario_active: bool = False,
 ) -> GuardrailReport:
     """
-    Runs all eleven guardrails and derives the overall outcome. Every
+    Runs all twelve guardrails and derives the overall outcome. Every
     rule is evaluated regardless of whether an earlier one failed.
 
     now: the "current time" freshness checks compare against. Defaults
@@ -319,6 +468,14 @@ def evaluate_guardrails(
     The four *_seconds/min_* keyword arguments override the module-level
     defaults (themselves read from .env) -- mainly for tests; normal
     callers leave them as None and get the configured thresholds.
+
+    confirmation_timeframe/confirmation_capture_result/
+    confirmation_agent_result/confirmation_capture_matches_primary_hash/
+    force_scenario_active (7A Iteration 2) feed CROSS_TIMEFRAME_AGREEMENT --
+    see _cross_timeframe_agreement() above for what each one means. All
+    default to values that make the rule report N/A (confirmation_timeframe
+    stays None), so a caller that doesn't pass any of them gets the exact
+    behavior this function had before this iteration for every other rule.
     """
     trade_params = trade_params or TradeParams()
     now = now or datetime.now(timezone.utc)
@@ -348,6 +505,17 @@ def evaluate_guardrails(
         ("UNCERTAINTY_ACCEPTABLE", _uncertainty_acceptable(agent_analysis)),
         ("SCORE_THRESHOLD", _score_threshold(evaluation_result, min_total_score)),
         ("SYNTHETIC_DATA", _synthetic_data(capture_result, market_data_result)),
+        (
+            "CROSS_TIMEFRAME_AGREEMENT",
+            _cross_timeframe_agreement(
+                agent_analysis,
+                confirmation_timeframe,
+                confirmation_capture_result,
+                confirmation_agent_result,
+                confirmation_capture_matches_primary_hash,
+                force_scenario_active,
+            ),
+        ),
     ]
 
     checks = tuple(

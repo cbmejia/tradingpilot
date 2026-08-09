@@ -8,13 +8,26 @@ import { SourceModeBadge } from "./DemoBadge";
 interface ChartCapturePanelProps {
   runId: string;
   capture: CaptureOut | undefined;
+  // 7A Iteration 2: which capture to fetch the image for -- "PRIMARY"
+  // (the default, unchanged from before this iteration) or
+  // "CONFIRMATION". Must match `capture`'s own timeframe_role; the caller
+  // is responsible for passing the right pair (RunDetailView does).
+  role?: "PRIMARY" | "CONFIRMATION";
 }
 
-export function ChartCapturePanel({ runId, capture }: ChartCapturePanelProps) {
+export function ChartCapturePanel({ runId, capture, role = "PRIMARY" }: ChartCapturePanelProps) {
   const [imageFailedToLoad, setImageFailedToLoad] = useState(false);
 
   if (!capture) {
-    return <EmptyState message="No chart has been captured yet." />;
+    return (
+      <EmptyState
+        message={
+          role === "PRIMARY"
+            ? "No chart has been captured yet."
+            : "No confirmation chart has been captured yet."
+        }
+      />
+    );
   }
 
   if (capture.status !== "SUCCESS") {
@@ -25,7 +38,7 @@ export function ChartCapturePanel({ runId, capture }: ChartCapturePanelProps) {
     return (
       <ErrorNotice
         title="Chart image could not be loaded"
-        message={`The capture succeeded but the image failed to load from ${screenshotUrl(runId)}.`}
+        message={`The capture succeeded but the image failed to load from ${screenshotUrl(runId, role)}.`}
       />
     );
   }
@@ -41,8 +54,8 @@ export function ChartCapturePanel({ runId, capture }: ChartCapturePanelProps) {
         )}
       </div>
       <img
-        src={screenshotUrl(runId)}
-        alt={`${capture.symbol} ${capture.timeframe} chart`}
+        src={screenshotUrl(runId, role)}
+        alt={`${capture.symbol} ${capture.timeframe} chart (${role.toLowerCase()})`}
         className="w-full rounded-lg border border-slate-800"
         onError={() => setImageFailedToLoad(true)}
       />

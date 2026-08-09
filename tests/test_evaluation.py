@@ -443,6 +443,49 @@ def test_evaluator_never_reads_proposal_attributes():
 
 
 # ---------------------------------------------------------------------------
+# 7A Iteration 2 -- evals/trade_evaluator.py is untouched by
+# confirmation_analyses, the new table added for the cross-timeframe
+# confirmation call's own result. Unlike agent_proposals (whose fields
+# live ON AgentAnalysisResult, the object evaluate() already takes), a
+# confirmation result is a completely separate dataclass
+# (ConfirmationAnalysisResult) that evaluate() never even receives as an
+# argument -- so the strongest proof available is: evaluate()'s own
+# signature has no confirmation-shaped parameter, and its source contains
+# zero references to any confirmation-call identifier, the same
+# source-grep style test_evaluator_never_reads_proposal_attributes above
+# already uses for the proposal fields.
+# ---------------------------------------------------------------------------
+
+
+def test_evaluate_signature_has_no_confirmation_parameter():
+    """evaluate(agent_analysis, trade_params) -- exactly two parameters,
+    neither named or shaped like anything confirmation-related. If this
+    ever grows a confirmation_analysis/confirmation_result parameter,
+    that's the evaluator starting to read cross-timeframe data into a
+    score -- the exact thing 7A Iteration 2 was designed to keep out."""
+    params = set(inspect.signature(evaluate).parameters)
+    assert params == {"agent_analysis", "trade_params"}
+
+
+def test_evaluator_never_reads_confirmation_analysis_attributes():
+    """Static confirmation, source-grep included: evals/trade_evaluator.py
+    has zero references to any confirmation-call identifier --
+    ConfirmationAnalysisResult itself, or any of its three fields."""
+    import evals.trade_evaluator as trade_evaluator
+
+    source = inspect.getsource(trade_evaluator)
+    for identifier in (
+        "ConfirmationAnalysisResult",
+        "confirmation_analysis",
+        "confirmation_visible_timeframe",
+        "confirmation_trend_direction",
+        "confirmation_trend_quality",
+        "visible_timeframe",
+    ):
+        assert identifier not in source
+
+
+# ---------------------------------------------------------------------------
 # Uncertainty caps -- the hard-coded 20/14/8 behavior (unchanged from v1)
 # ---------------------------------------------------------------------------
 

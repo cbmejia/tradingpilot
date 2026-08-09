@@ -62,6 +62,11 @@ class CaptureOut(BaseModel):
 
     id: int
     capture_mode: str
+    # 7A Iteration 2: "PRIMARY" | "CONFIRMATION" -- a run can now have up
+    # to two captures; this is what distinguishes them (order in the
+    # captures list also guarantees PRIMARY first, but this field is the
+    # explicit, unambiguous way to tell them apart).
+    timeframe_role: str
     symbol: str
     timeframe: str
     screenshot_path: Optional[str]
@@ -178,6 +183,30 @@ class AgentProposalOut(BaseModel):
     timestamp: datetime
 
 
+class ConfirmationAnalysisOut(BaseModel):
+    """
+    7A Iteration 2. The confirmation call's own read of a run's
+    confirmation-timeframe chart -- a SEPARATE Claude call from the
+    primary AgentAnalysisOut above (see agents/trade_agent.py's
+    TradeAgent.analyze_confirmation()). has_proposal-style absence
+    matters here too: no ConfirmationAnalysisOut on a RunDetail at all
+    means the question was never reached (the primary timeframe was
+    already at the top of the ladder, or force_scenario suppressed it);
+    status="FAILED" means it was reached and didn't succeed (a real
+    reason in error_message either way).
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    status: str
+    visible_timeframe: Optional[str]
+    trend_direction: Optional[str]
+    trend_quality: Optional[str]
+    error_message: Optional[str]
+    timestamp: datetime
+
+
 class GuardrailResultOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -244,6 +273,11 @@ class RunDetail(RunSummary):
     # question of a proposal was never reached) -- see AgentProposalOut
     # for the has_proposal=False vs. absent distinction.
     proposal: Optional[AgentProposalOut] = None
+    # 7A Iteration 2: None if there was no confirmation timeframe to
+    # attempt at all (top of the ladder, or force_scenario active) -- see
+    # ConfirmationAnalysisOut's own docstring for the absent-vs-FAILED
+    # distinction.
+    confirmation_analysis: Optional[ConfirmationAnalysisOut] = None
 
     # Derived, not a database column: "BLOCKED" / "REQUIRES_REVIEW" /
     # "READY_FOR_REVIEW", computed from guardrail_results above using the

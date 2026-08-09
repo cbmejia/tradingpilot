@@ -21,6 +21,7 @@ EXPECTED_TABLES = {
     "market_data",
     "agent_analyses",
     "agent_proposals",
+    "confirmation_analyses",
     "evaluations",
     "guardrail_results",
     "human_reviews",
@@ -130,6 +131,7 @@ def test_save_capture(session):
         session,
         run_id=run.id,
         capture_mode="demo",
+        timeframe_role="PRIMARY",
         symbol="EURUSD",
         timeframe="1h",
         status="success",
@@ -140,6 +142,85 @@ def test_save_capture(session):
     assert capture.capture_mode == "demo"
     assert capture.status == "success"
     assert capture.error_message is None
+    assert capture.timeframe_role == "PRIMARY"
+
+
+def test_save_capture_with_confirmation_role(session):
+    """7A Iteration 2: a run's second capture (one higher timeframe,
+    purely for cross-timeframe context) is tagged CONFIRMATION."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    capture = crud.add_capture(
+        session,
+        run_id=run.id,
+        capture_mode="demo",
+        timeframe_role="CONFIRMATION",
+        symbol="EURUSD",
+        timeframe="4h",
+        status="success",
+        screenshot_path="screenshots/demo/EURUSD_4h_readable.png",
+    )
+
+    assert capture.timeframe_role == "CONFIRMATION"
+
+
+def test_add_capture_rejects_an_out_of_set_timeframe_role(session):
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    with pytest.raises(ValueError, match="timeframe_role"):
+        crud.add_capture(
+            session,
+            run_id=run.id,
+            capture_mode="demo",
+            timeframe_role="SECONDARY",  # not a real value
+            symbol="EURUSD",
+            timeframe="1h",
+            status="success",
+            screenshot_path="screenshots/demo/eurusd_1h.png",
+        )
+
+    reloaded = crud.get_run(session, run.id)
+    assert reloaded.captures == []
+
+
+def test_check_constraint_rejects_an_out_of_set_timeframe_role(session):
+    """Database-level check: bypassing crud.py entirely, the CHECK
+    constraint on Capture.timeframe_role still refuses an out-of-set
+    value."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    bad_capture = models.Capture(
+        run_id=run.id,
+        capture_mode="demo",
+        timeframe_role="SECONDARY",  # not a real value
+        symbol="EURUSD",
+        timeframe="1h",
+        status="success",
+    )
+    session.add(bad_capture)
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+    session.rollback()
+
+
+def test_a_run_can_hold_both_a_primary_and_a_confirmation_capture(session):
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+    crud.add_capture(
+        session, run_id=run.id, capture_mode="demo", timeframe_role="PRIMARY",
+        symbol="EURUSD", timeframe="1h", status="success",
+        screenshot_path="screenshots/demo/EURUSD_1h.png",
+    )
+    crud.add_capture(
+        session, run_id=run.id, capture_mode="demo", timeframe_role="CONFIRMATION",
+        symbol="EURUSD", timeframe="4h", status="success",
+        screenshot_path="screenshots/demo/EURUSD_4h_readable.png",
+    )
+
+    session.refresh(run)
+    roles = {c.timeframe_role for c in run.captures}
+    assert roles == {"PRIMARY", "CONFIRMATION"}
 
 
 def test_save_capture_failure_records_error(session):
@@ -149,6 +230,7 @@ def test_save_capture_failure_records_error(session):
         session,
         run_id=run.id,
         capture_mode="live",
+        timeframe_role="PRIMARY",
         symbol="EURUSD",
         timeframe="1h",
         status="error",
@@ -178,6 +260,7 @@ def test_capture_timestamp_round_trips_as_timezone_aware_utc(session):
         session,
         run_id=run.id,
         capture_mode="demo",
+        timeframe_role="PRIMARY",
         symbol="EURUSD",
         timeframe="1h",
         status="success",
@@ -720,6 +803,99 @@ def test_agent_proposal_direction_allowed_values_match_the_agent_layer():
     assert set(AGENT_PROPOSAL_DIRECTION_ALLOWED_VALUES) == ALLOWED_PROPOSAL_DIRECTIONS
 
 
+# ---------------------------------------------------------------------------
+# confirmation_analyses (7A Iteration 2)
+# ---------------------------------------------------------------------------
+
+
+def test_save_confirmation_analysis(session):
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    analysis = crud.add_confirmation_analysis(
+        session,
+        run_id=run.id,
+        visible_timeframe="4h",
+        trend_direction="UP",
+        trend_quality="STRONG",
+    )
+
+    assert analysis.run_id == run.id
+    assert analysis.status == "SUCCESS"
+    assert analysis.visible_timeframe == "4h"
+    assert analysis.trend_direction == "UP"
+    assert analysis.trend_quality == "STRONG"
+    assert analysis.error_message is None
+
+
+def test_save_failed_confirmation_analysis_stores_status_and_error_with_null_fields(session):
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    analysis = crud.add_failed_confirmation_analysis(
+        session,
+        run_id=run.id,
+        error_message="Confirmation capture did not succeed: Chart element never appeared.",
+    )
+
+    assert analysis.status == "FAILED"
+    assert analysis.visible_timeframe is None
+    assert analysis.trend_direction is None
+    assert analysis.trend_quality is None
+    assert "Chart element" in analysis.error_message
+
+
+def test_run_relationship_reaches_its_confirmation_analysis(session):
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+    crud.add_confirmation_analysis(
+        session, run_id=run.id, visible_timeframe="4h", trend_direction="DOWN", trend_quality="WEAK",
+    )
+
+    session.refresh(run)
+    assert run.confirmation_analysis is not None
+    assert run.confirmation_analysis.trend_direction == "DOWN"
+
+
+def test_add_confirmation_analysis_rejects_an_out_of_set_trend_direction(session):
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    with pytest.raises(ValueError, match="trend_direction"):
+        crud.add_confirmation_analysis(
+            session, run_id=run.id, visible_timeframe="4h", trend_direction="NORTH", trend_quality="STRONG",
+        )
+
+    reloaded = crud.get_run(session, run.id)
+    assert reloaded.confirmation_analysis is None
+
+
+def test_check_constraint_rejects_an_out_of_set_confirmation_trend_direction(session):
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    bad_analysis = models.ConfirmationAnalysis(
+        run_id=run.id, status="SUCCESS", visible_timeframe="4h",
+        trend_direction="NORTH", trend_quality="STRONG",
+    )
+    session.add(bad_analysis)
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+    session.rollback()
+
+
+def test_confirmation_trend_allowed_values_match_the_agent_layer():
+    """Drift guard: database.models.CONFIRMATION_TREND_DIRECTION_ALLOWED_VALUES/
+    CONFIRMATION_TREND_QUALITY_ALLOWED_VALUES are duplicated from
+    agents.trade_agent's own allowed sets on purpose (so database/ stays a
+    leaf module) -- this test is what keeps them from silently diverging."""
+    from agents.trade_agent import CONFIRMATION_TREND_DIRECTION_ALLOWED, CONFIRMATION_TREND_QUALITY_ALLOWED
+    from database.models import (
+        CONFIRMATION_TREND_DIRECTION_ALLOWED_VALUES,
+        CONFIRMATION_TREND_QUALITY_ALLOWED_VALUES,
+    )
+
+    assert set(CONFIRMATION_TREND_DIRECTION_ALLOWED_VALUES) == CONFIRMATION_TREND_DIRECTION_ALLOWED
+    assert set(CONFIRMATION_TREND_QUALITY_ALLOWED_VALUES) == CONFIRMATION_TREND_QUALITY_ALLOWED
+
+
 def test_save_evaluation_computes_total_score(session):
     run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
 
@@ -991,6 +1167,7 @@ def test_run_relationships_reach_all_child_records(session):
         session,
         run_id=run.id,
         capture_mode="demo",
+        timeframe_role="PRIMARY",
         symbol="GBPUSD",
         timeframe="4h",
         status="success",

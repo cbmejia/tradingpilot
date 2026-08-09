@@ -25,6 +25,7 @@ function partialRun(overrides: Partial<RunDetail>): RunDetail {
     audit_events: [],
     guardrail_outcome: null,
     proposal: null,
+    confirmation_analysis: null,
     ...overrides,
   };
 }
@@ -42,6 +43,7 @@ describe("PipelineProgress", () => {
         {
           id: 1,
           capture_mode: "DEMO",
+          timeframe_role: "PRIMARY",
           symbol: "EURUSD",
           timeframe: "1h",
           screenshot_path: "x.png",

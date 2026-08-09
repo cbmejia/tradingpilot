@@ -14,9 +14,16 @@ export type SourceMode = "LIVE" | "DEMO";
 export type GuardrailOutcome = "BLOCKED" | "REQUIRES_REVIEW" | "READY_FOR_REVIEW";
 export type ReviewDecision = "APPROVED" | "REJECTED";
 
+// 7A Iteration 2: which of a run's (up to two) captures this is -- the
+// timeframe the user actually intends to trade on ("PRIMARY", the only
+// kind that existed before this iteration), or one rung up the fixed
+// ladder captured purely for cross-timeframe context ("CONFIRMATION").
+export type CaptureTimeframeRole = "PRIMARY" | "CONFIRMATION";
+
 export interface CaptureOut {
   id: number;
   capture_mode: SourceMode | string;
+  timeframe_role: CaptureTimeframeRole | string;
   symbol: string;
   timeframe: string;
   screenshot_path: string | null;
@@ -110,6 +117,24 @@ export interface AgentProposalOut {
   timestamp: string;
 }
 
+// 7A Iteration 2. The confirmation call's own read of a run's
+// confirmation-timeframe chart -- a SEPARATE Claude call from the
+// primary AgentAnalysisOut above. No ConfirmationAnalysisOut on a
+// RunDetail at all means the question was never reached (top of the
+// ladder, or a Milestone 12 force_scenario run); status="FAILED" means
+// it was reached and didn't succeed (a real reason in error_message
+// either way). Never read by the run's own score or guardrail outcome
+// except via the derived CROSS_TIMEFRAME_AGREEMENT guardrail result.
+export interface ConfirmationAnalysisOut {
+  id: number;
+  status: AgentAnalysisStatus | string;
+  visible_timeframe: string | null;
+  trend_direction: string | null;
+  trend_quality: string | null;
+  error_message: string | null;
+  timestamp: string;
+}
+
 export interface RunSummary {
   id: string;
   symbol: string;
@@ -141,6 +166,11 @@ export interface RunDetail extends RunSummary {
   // question of a proposal was never reached) -- see AgentProposalOut for
   // the has_proposal=false vs. absent distinction.
   proposal: AgentProposalOut | null;
+  // 7A Iteration 2: null if there was no confirmation timeframe to
+  // attempt at all (top of the ladder, or force_scenario active) -- see
+  // ConfirmationAnalysisOut's own docstring for the absent-vs-FAILED
+  // distinction.
+  confirmation_analysis: ConfirmationAnalysisOut | null;
 }
 
 export interface RunListResponse {
