@@ -81,6 +81,33 @@ WELL_FORMED_RESPONSE = json.dumps(
         "structure_quality": "CLEAN",
         "setup_quality": "ACCEPTABLE",
         "context_risk": "LOW",
+        "proposal_has_proposal": False,
+        "proposal_direction": None,
+        "proposal_entry": None,
+        "proposal_stop": None,
+        "proposal_target": None,
+    }
+)
+
+# A well-formed response where the agent DOES propose alternative levels --
+# used by the 7A Iteration 1 tests below.
+WELL_FORMED_RESPONSE_WITH_PROPOSAL = json.dumps(
+    {
+        "analysis_text": "Price has been grinding higher against a rising trendline.",
+        "trend_assessment": "uptrend",
+        "structure_assessment": "higher highs and higher lows",
+        "setup_assessment": "pullback toward the trendline, not yet confirmed",
+        "uncertainty": "MEDIUM",
+        "trend_direction": "UP",
+        "trend_quality": "STRONG",
+        "structure_quality": "CLEAN",
+        "setup_quality": "ACCEPTABLE",
+        "context_risk": "LOW",
+        "proposal_has_proposal": True,
+        "proposal_direction": "LONG",
+        "proposal_entry": 1.0950,
+        "proposal_stop": 1.0900,
+        "proposal_target": 1.1050,
     }
 )
 
@@ -182,6 +209,11 @@ def test_high_uncertainty_is_accepted_as_a_valid_honest_answer():
             "structure_quality": "UNCLEAR",
             "setup_quality": "UNCLEAR",
             "context_risk": "UNCLEAR",
+            "proposal_has_proposal": False,
+            "proposal_direction": None,
+            "proposal_entry": None,
+            "proposal_stop": None,
+            "proposal_target": None,
         }
     )
     client = _fake_client(response)
@@ -433,6 +465,290 @@ def test_categorical_field_is_normalized_to_uppercase():
 
     assert result.status == AgentAnalysisStatus.SUCCESS
     assert result.structure_quality == "CLEAN"
+
+
+# ---------------------------------------------------------------------------
+# 7A Iteration 1 -- the proposal carve-out, and its enforcement (not just a
+# prompt instruction). Two requirements drove these tests specifically:
+# (1) a probability/percentage/confidence/likelihood/odds-named field is
+#     rejected whatever it's named, even when its value isn't numeric yet;
+# (2) proposal_has_proposal <-> the four level fields must match, in BOTH
+#     directions, or the response is FAILED, never coerced to whichever
+#     state looks closest.
+# ---------------------------------------------------------------------------
+
+
+def test_well_formed_response_with_a_proposal_maps_into_proposal_fields():
+    client = _fake_client(WELL_FORMED_RESPONSE_WITH_PROPOSAL)
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.SUCCESS
+    assert result.proposal_has_proposal is True
+    assert result.proposal_direction == "LONG"
+    assert result.proposal_entry == 1.0950
+    assert result.proposal_stop == 1.0900
+    assert result.proposal_target == 1.1050
+
+
+def test_well_formed_response_declining_a_proposal_maps_to_all_none():
+    client = _fake_client(WELL_FORMED_RESPONSE)  # declines by default
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.SUCCESS
+    assert result.proposal_has_proposal is False
+    assert result.proposal_direction is None
+    assert result.proposal_entry is None
+    assert result.proposal_stop is None
+    assert result.proposal_target is None
+
+
+def test_proposal_direction_is_normalized_to_uppercase():
+    payload = json.loads(WELL_FORMED_RESPONSE_WITH_PROPOSAL)
+    payload["proposal_direction"] = "long"  # lowercase
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.SUCCESS
+    assert result.proposal_direction == "LONG"
+
+
+def test_out_of_set_proposal_direction_returns_failed_not_coerced():
+    payload = json.loads(WELL_FORMED_RESPONSE_WITH_PROPOSAL)
+    payload["proposal_direction"] = "SIDEWAYS"  # not LONG or SHORT
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert result.proposal_direction is None
+    assert "proposal_direction" in result.error_message
+
+
+# --- Requirement 1: probability/confidence-named fields are rejected
+# whatever they're named, whatever type they carry ---
+
+
+def test_extra_probability_field_is_rejected_even_as_a_string():
+    payload = json.loads(WELL_FORMED_RESPONSE)
+    payload["probability"] = "high"  # not numeric -- a plain numeric check would miss this
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert result.analysis_text is None
+
+
+def test_extra_percentage_field_is_rejected():
+    payload = json.loads(WELL_FORMED_RESPONSE)
+    payload["percentage_confident"] = "85%"
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+
+
+def test_extra_confidence_field_is_rejected_as_a_string():
+    payload = json.loads(WELL_FORMED_RESPONSE)
+    payload["confidence"] = "very confident"
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+
+
+def test_extra_likelihood_field_is_rejected():
+    payload = json.loads(WELL_FORMED_RESPONSE)
+    payload["likelihood_of_success"] = "moderate"
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+
+
+def test_extra_odds_field_is_rejected():
+    payload = json.loads(WELL_FORMED_RESPONSE)
+    payload["odds"] = "3:1"
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+
+
+def test_extra_numeric_probability_field_is_also_rejected():
+    """The numeric check and the keyword check both fire on the same
+    field in this case -- confirms they're not mutually exclusive."""
+    payload = json.loads(WELL_FORMED_RESPONSE)
+    payload["win_probability"] = 0.87
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+
+
+# --- Requirement 2: a numeric value is STILL rejected everywhere except
+# the three carved-out proposal fields, exactly as before this iteration ---
+
+
+def test_numeric_value_in_proposal_direction_is_rejected():
+    payload = json.loads(WELL_FORMED_RESPONSE_WITH_PROPOSAL)
+    payload["proposal_direction"] = 1  # a number, not "LONG"/"SHORT"
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert result.proposal_direction is None
+
+
+def test_numeric_value_in_analysis_text_is_still_rejected_alongside_a_proposal():
+    """A numeric prose field is rejected exactly as it always was, even in
+    a response that also carries a well-formed proposal -- the carve-out
+    doesn't loosen anything else."""
+    payload = json.loads(WELL_FORMED_RESPONSE_WITH_PROPOSAL)
+    payload["analysis_text"] = 42
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+
+
+def test_numeric_uncertainty_is_still_rejected_alongside_a_proposal():
+    payload = json.loads(WELL_FORMED_RESPONSE_WITH_PROPOSAL)
+    payload["uncertainty"] = 1
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+
+
+def test_string_value_in_a_proposal_numeric_field_is_rejected():
+    """proposal_entry/stop/target must be real JSON numbers -- a numeric-
+    looking string doesn't qualify, same strictness as everywhere else."""
+    payload = json.loads(WELL_FORMED_RESPONSE_WITH_PROPOSAL)
+    payload["proposal_entry"] = "1.0950"
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert result.proposal_entry is None
+
+
+# --- Requirement 3: proposal_has_proposal must be a real JSON boolean ---
+
+
+def test_proposal_has_proposal_rejects_integer_zero():
+    payload = json.loads(WELL_FORMED_RESPONSE)
+    payload["proposal_has_proposal"] = 0
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert "proposal_has_proposal" in result.error_message
+
+
+def test_proposal_has_proposal_rejects_integer_one():
+    payload = json.loads(WELL_FORMED_RESPONSE_WITH_PROPOSAL)
+    payload["proposal_has_proposal"] = 1
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert "proposal_has_proposal" in result.error_message
+
+
+def test_proposal_has_proposal_rejects_the_string_true():
+    payload = json.loads(WELL_FORMED_RESPONSE)
+    payload["proposal_has_proposal"] = "true"
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert "proposal_has_proposal" in result.error_message
+
+
+def test_proposal_has_proposal_rejects_the_string_yes():
+    payload = json.loads(WELL_FORMED_RESPONSE)
+    payload["proposal_has_proposal"] = "yes"
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert "proposal_has_proposal" in result.error_message
+
+
+# --- Requirement 4: the fourth case -- has_proposal/levels mismatch in
+# EITHER direction is a malformed response, never coerced ---
+
+
+def test_declined_proposal_with_populated_levels_is_rejected():
+    """proposal_has_proposal=false but the levels are filled in anyway --
+    a malformed response, not silently treated as an accepted proposal."""
+    payload = json.loads(WELL_FORMED_RESPONSE)
+    payload["proposal_entry"] = 1.0950
+    payload["proposal_stop"] = 1.0900
+    payload["proposal_target"] = 1.1050
+    payload["proposal_direction"] = "LONG"
+    # proposal_has_proposal is still False from WELL_FORMED_RESPONSE.
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert result.proposal_entry is None
+    assert result.proposal_direction is None
+    assert "proposal" in result.error_message.lower()
+
+
+def test_accepted_proposal_with_a_null_level_is_rejected():
+    """proposal_has_proposal=true but one of the levels is null -- also
+    malformed, not silently treated as a decline."""
+    payload = json.loads(WELL_FORMED_RESPONSE_WITH_PROPOSAL)
+    payload["proposal_target"] = None
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert result.proposal_entry is None
+    assert "proposal_target" in result.error_message
+
+
+def test_accepted_proposal_with_a_null_direction_is_rejected():
+    payload = json.loads(WELL_FORMED_RESPONSE_WITH_PROPOSAL)
+    payload["proposal_direction"] = None
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert result.proposal_direction is None
+
+
+def test_missing_proposal_field_returns_failed():
+    payload = json.loads(WELL_FORMED_RESPONSE)
+    del payload["proposal_has_proposal"]
+    client = _fake_client(json.dumps(payload))
+
+    result = TradeAgent(client=client).analyze(_successful_capture(), _successful_market_data())
+
+    assert result.status == AgentAnalysisStatus.FAILED
+    assert "proposal_has_proposal" in result.error_message
 
 
 # ---------------------------------------------------------------------------

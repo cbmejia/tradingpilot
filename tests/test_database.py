@@ -20,6 +20,7 @@ EXPECTED_TABLES = {
     "captures",
     "market_data",
     "agent_analyses",
+    "agent_proposals",
     "evaluations",
     "guardrail_results",
     "human_reviews",
@@ -97,6 +98,29 @@ def test_create_run(session):
     assert run.status == "pending"
     assert run.created_at is not None
     assert run.completed_at is None
+    assert run.accepted_from_run_id is None
+
+
+def test_create_run_with_accepted_from_run_id_round_trips(session):
+    """7A Iteration 1: a run created via the accept-proposal flow records
+    which run's proposal it came from."""
+    source_run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    new_run = crud.create_run(
+        session,
+        symbol="EURUSD",
+        timeframe="1h",
+        direction="LONG",
+        entry=1.0950,
+        stop=1.0900,
+        target=1.1050,
+        status="CREATED",
+        accepted_from_run_id=source_run.id,
+    )
+
+    session.expire(new_run)
+    reloaded = crud.get_run(session, new_run.id)
+    assert reloaded.accepted_from_run_id == source_run.id
 
 
 def test_save_capture(session):
@@ -454,6 +478,246 @@ def test_save_failed_agent_analysis_stores_status_and_error_with_null_fields(ses
     assert analysis.structure_quality is None
     assert analysis.setup_quality is None
     assert analysis.context_risk is None
+
+
+# ---------------------------------------------------------------------------
+# agent_proposals (7A Iteration 1)
+# ---------------------------------------------------------------------------
+
+
+def test_save_agent_proposal_with_coherent_levels(session):
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    proposal = crud.add_agent_proposal(
+        session,
+        run_id=run.id,
+        direction="LONG",
+        entry=1.0950,
+        stop=1.0900,
+        target=1.1050,
+        is_coherent=True,
+        risk_reward_ratio=2.0,
+    )
+
+    assert proposal.run_id == run.id
+    assert proposal.has_proposal is True
+    assert proposal.direction == "LONG"
+    assert proposal.entry == 1.0950
+    assert proposal.risk_reward_ratio == 2.0
+    assert proposal.is_coherent is True
+    assert proposal.coherence_error is None
+
+
+def test_save_agent_proposal_with_incoherent_levels(session):
+    """An incoherent proposal (e.g. stop on the wrong side) is still
+    stored -- has_proposal True, is_coherent False, a real reason, and no
+    ratio (never a guessed one)."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    proposal = crud.add_agent_proposal(
+        session,
+        run_id=run.id,
+        direction="LONG",
+        entry=1.0950,
+        stop=1.1000,  # stop above entry on a LONG -- incoherent
+        target=1.1050,
+        is_coherent=False,
+        coherence_error="stop is on the wrong side of entry for a long trade",
+    )
+
+    assert proposal.has_proposal is True
+    assert proposal.is_coherent is False
+    assert proposal.risk_reward_ratio is None
+    assert "wrong side" in proposal.coherence_error
+
+
+def test_save_declined_proposal(session):
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    proposal = crud.add_declined_proposal(session, run_id=run.id)
+
+    assert proposal.has_proposal is False
+    assert proposal.direction is None
+    assert proposal.entry is None
+    assert proposal.stop is None
+    assert proposal.target is None
+    assert proposal.risk_reward_ratio is None
+    assert proposal.is_coherent is None
+    assert proposal.coherence_error is None
+
+
+def test_run_relationship_reaches_its_proposal(session):
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+    crud.add_agent_proposal(
+        session,
+        run_id=run.id,
+        direction="SHORT",
+        entry=1.1000,
+        stop=1.1050,
+        target=1.0900,
+        is_coherent=True,
+        risk_reward_ratio=2.0,
+    )
+
+    session.refresh(run)
+    assert run.proposal is not None
+    assert run.proposal.direction == "SHORT"
+
+
+def test_add_agent_proposal_rejects_an_out_of_set_direction(session):
+    """Application-level check: an out-of-set direction is rejected
+    before anything is written."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    with pytest.raises(ValueError, match="direction"):
+        crud.add_agent_proposal(
+            session,
+            run_id=run.id,
+            direction="SIDEWAYS",  # not a real value
+            entry=1.0950,
+            stop=1.0900,
+            target=1.1050,
+            is_coherent=True,
+            risk_reward_ratio=2.0,
+        )
+
+    reloaded = crud.get_run(session, run.id)
+    assert reloaded.proposal is None
+
+
+def test_add_agent_proposal_requires_a_ratio_when_coherent(session):
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    with pytest.raises(ValueError, match="risk_reward_ratio"):
+        crud.add_agent_proposal(
+            session,
+            run_id=run.id,
+            direction="LONG",
+            entry=1.0950,
+            stop=1.0900,
+            target=1.1050,
+            is_coherent=True,
+            # risk_reward_ratio omitted -- must be rejected, not defaulted
+        )
+
+
+def test_add_agent_proposal_requires_an_error_when_incoherent(session):
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    with pytest.raises(ValueError, match="coherence_error"):
+        crud.add_agent_proposal(
+            session,
+            run_id=run.id,
+            direction="LONG",
+            entry=1.0950,
+            stop=1.1000,
+            target=1.1050,
+            is_coherent=False,
+            # coherence_error omitted -- must be rejected, not defaulted
+        )
+
+
+def test_check_constraint_rejects_an_out_of_set_proposal_direction(session):
+    """Database-level check: bypassing crud.py entirely, the CHECK
+    constraint on AgentProposal.direction still refuses an out-of-set
+    value."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    bad_proposal = models.AgentProposal(
+        run_id=run.id,
+        has_proposal=True,
+        direction="SIDEWAYS",  # not a real value
+        entry=1.0950,
+        stop=1.0900,
+        target=1.1050,
+        is_coherent=True,
+        risk_reward_ratio=2.0,
+    )
+    session.add(bad_proposal)
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+    session.rollback()
+
+
+def test_check_constraint_rejects_has_proposal_true_with_a_null_level(session):
+    """The fourth-case guard at the database level too: has_proposal=True
+    with a null level is refused, mirroring _parse_response()'s own
+    rejection of the same shape in agents/trade_agent.py."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    bad_proposal = models.AgentProposal(
+        run_id=run.id,
+        has_proposal=True,
+        direction="LONG",
+        entry=1.0950,
+        stop=1.0900,
+        target=None,  # missing
+        is_coherent=True,
+        risk_reward_ratio=2.0,
+    )
+    session.add(bad_proposal)
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+    session.rollback()
+
+
+def test_check_constraint_rejects_has_proposal_false_with_a_populated_level(session):
+    """The other direction of the fourth case: has_proposal=False with a
+    populated level is refused."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    bad_proposal = models.AgentProposal(
+        run_id=run.id,
+        has_proposal=False,
+        direction=None,
+        entry=1.0950,  # should be null when has_proposal is False
+        stop=None,
+        target=None,
+        is_coherent=None,
+        risk_reward_ratio=None,
+    )
+    session.add(bad_proposal)
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+    session.rollback()
+
+
+def test_check_constraint_rejects_a_coherent_proposal_missing_its_ratio(session):
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    bad_proposal = models.AgentProposal(
+        run_id=run.id,
+        has_proposal=True,
+        direction="LONG",
+        entry=1.0950,
+        stop=1.0900,
+        target=1.1050,
+        is_coherent=True,
+        risk_reward_ratio=None,  # required when is_coherent is True
+    )
+    session.add(bad_proposal)
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+    session.rollback()
+
+
+def test_agent_proposal_direction_allowed_values_match_the_agent_layer():
+    """Drift guard: database.models.AGENT_PROPOSAL_DIRECTION_ALLOWED_VALUES
+    is duplicated from agents.trade_agent.ALLOWED_PROPOSAL_DIRECTIONS on
+    purpose (so database/ stays a leaf module) -- this test is what keeps
+    the two from silently diverging."""
+    from agents.trade_agent import ALLOWED_PROPOSAL_DIRECTIONS
+    from database.models import AGENT_PROPOSAL_DIRECTION_ALLOWED_VALUES
+
+    assert set(AGENT_PROPOSAL_DIRECTION_ALLOWED_VALUES) == ALLOWED_PROPOSAL_DIRECTIONS
 
 
 def test_save_evaluation_computes_total_score(session):

@@ -109,7 +109,10 @@ def test_a_normal_analysis_without_force_scenario_is_unaffected(client):
         status=AgentAnalysisStatus.SUCCESS,
         analysis_text="Real analysis.", trend_assessment="x", structure_assessment="x", setup_assessment="x",
         uncertainty="MEDIUM", trend_direction="UP", trend_quality="STRONG", structure_quality="CLEAN",
-        setup_quality="ACCEPTABLE", context_risk="LOW", timestamp=datetime.now(timezone.utc), error_message=None,
+        setup_quality="ACCEPTABLE", context_risk="LOW",
+        proposal_has_proposal=False, proposal_direction=None, proposal_entry=None,
+        proposal_stop=None, proposal_target=None,
+        timestamp=datetime.now(timezone.utc), error_message=None,
     )
     with patch("backend.orchestrator.TradeAgent", return_value=mock_agent):
         _, response = _create_and_analyze(client)

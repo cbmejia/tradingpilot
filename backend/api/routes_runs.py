@@ -26,6 +26,7 @@ from sqlalchemy.orm import Session
 from backend import config
 from backend.orchestrator import FORCE_SCENARIOS, RunAlreadyAnalyzedError, run_pipeline
 from backend.schemas import (
+    AcceptProposalResponse,
     HumanReviewRequest,
     HumanReviewResponse,
     RunCreateRequest,
@@ -311,4 +312,86 @@ def review_run(
         decided_at=review.decided_at,
         comment=review.comment,
         run_status=updated_run.status,
+    )
+
+
+@router.post("/{run_id}/accept-proposal", response_model=AcceptProposalResponse, status_code=201)
+def accept_proposal(run_id: str, session: Session = Depends(get_session)) -> AcceptProposalResponse:
+    """
+    7A Iteration 1. Accepting a proposal never rescores or re-analyzes
+    run_id -- it only creates a brand-new run, seeded with the agent's
+    proposed entry/stop/target/direction as that new run's own ordinary
+    trade params (Run.accepted_from_run_id records where they came from).
+    The new run still has to go through POST /runs/{new_run_id}/analyze
+    like any other run -- accepting a proposal is not itself an analysis,
+    and the accepted levels are not pre-scored by this endpoint in any way.
+
+    409 if this run has no agent proposal at all (the agent's analysis
+    never succeeded, so the question was never reached) or the agent
+    explicitly declined to propose (has_proposal=False) -- either way,
+    there is nothing here to accept. An incoherent proposal (stop on the
+    wrong side, zero risk distance) CAN be accepted: the new run just
+    carries those same incoherent params, and will fail TRADE_PARAMS_VALID
+    when analyzed, exactly as it would if a human had typed those numbers
+    in by hand -- no special-casing needed, since accepting doesn't imply
+    endorsing the math.
+    """
+    run = crud.get_run(session, run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+
+    proposal = run.proposal
+    if proposal is None or not proposal.has_proposal:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Run {run_id} has no agent-proposed trade levels to accept.",
+        )
+
+    new_run = crud.create_run(
+        session,
+        symbol=run.symbol,
+        timeframe=run.timeframe,
+        direction=proposal.direction,
+        entry=proposal.entry,
+        stop=proposal.stop,
+        target=proposal.target,
+        status="CREATED",
+        accepted_from_run_id=run.id,
+    )
+    crud.add_audit_event(
+        session,
+        run_id=new_run.id,
+        event_type="run_created",
+        event_message=f"Run created for {new_run.symbol} {new_run.timeframe}",
+    )
+    crud.add_audit_event(
+        session,
+        run_id=new_run.id,
+        event_type="accepted_from_proposal",
+        event_message=(
+            f"Created by accepting the agent-proposed trade levels from run {run.id} "
+            f"(direction={proposal.direction}, entry={proposal.entry}, stop={proposal.stop}, "
+            f"target={proposal.target})."
+        ),
+    )
+    crud.add_audit_event(
+        session,
+        run_id=run.id,
+        event_type="proposal_accepted",
+        event_message=(
+            f"Agent-proposed trade levels accepted by a human reviewer; new run "
+            f"{new_run.id} was created from them."
+        ),
+    )
+
+    return AcceptProposalResponse(
+        id=new_run.id,
+        accepted_from_run_id=run.id,
+        symbol=new_run.symbol,
+        timeframe=new_run.timeframe,
+        direction=new_run.direction,
+        entry=new_run.entry,
+        stop=new_run.stop,
+        target=new_run.target,
+        status=new_run.status,
     )

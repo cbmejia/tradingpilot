@@ -31,6 +31,11 @@ def _analysis(**overrides) -> AgentAnalysisResult:
         structure_quality="CLEAN",
         setup_quality="TEXTBOOK",
         context_risk="LOW",
+        proposal_has_proposal=False,
+        proposal_direction=None,
+        proposal_entry=None,
+        proposal_stop=None,
+        proposal_target=None,
         timestamp=datetime.now(timezone.utc),
         error_message=None,
     )
@@ -331,6 +336,11 @@ def test_failed_agent_analysis_returns_failed_evaluation_without_scoring():
         structure_quality=None,
         setup_quality=None,
         context_risk=None,
+        proposal_has_proposal=None,
+        proposal_direction=None,
+        proposal_entry=None,
+        proposal_stop=None,
+        proposal_target=None,
         timestamp=None,
         error_message="No chart to analyze -- capture status is FAILED.",
     )
@@ -342,6 +352,94 @@ def test_failed_agent_analysis_returns_failed_evaluation_without_scoring():
     assert result.trend_score is None
     assert result.risk_reward_score is None
     assert "No agent analysis to evaluate" in result.error_message
+
+
+# ---------------------------------------------------------------------------
+# 7A Iteration 1 -- evals/trade_evaluator.py is untouched by the proposal
+# carve-out. This is the direct proof: evaluate()'s behavior on an analysis
+# carrying a stored proposal must be identical to its behavior on one with
+# none, for both a coherent and an incoherent proposal, and regardless of
+# what the proposed levels actually are. If this ever fails, something
+# started reading agent_proposals data into a score -- exactly the "the
+# agent could engineer RR=2.0 for itself" risk docs/handoff.md's 7A
+# invariant exists to rule out.
+# ---------------------------------------------------------------------------
+
+
+def test_evaluator_result_is_identical_with_or_without_a_stored_proposal():
+    params = _long_params()  # RR = 2.0, unrelated to any proposal below
+
+    without_proposal = evaluate(
+        _analysis(
+            proposal_has_proposal=False,
+            proposal_direction=None,
+            proposal_entry=None,
+            proposal_stop=None,
+            proposal_target=None,
+        ),
+        params,
+    )
+    with_coherent_proposal = evaluate(
+        _analysis(
+            proposal_has_proposal=True,
+            proposal_direction="LONG",
+            proposal_entry=1.0950,
+            proposal_stop=1.0900,
+            proposal_target=1.1050,
+        ),
+        params,
+    )
+    # A proposal that would itself be incoherent (stop on the wrong side)
+    # -- still must not change anything about the CURRENT run's score,
+    # since compute_risk_reward() is only ever called on this proposal by
+    # backend/orchestrator.py, never by evaluate() itself.
+    with_incoherent_proposal = evaluate(
+        _analysis(
+            proposal_has_proposal=True,
+            proposal_direction="LONG",
+            proposal_entry=1.0950,
+            proposal_stop=1.1000,  # wrong side for LONG
+            proposal_target=1.1050,
+        ),
+        params,
+    )
+    # A proposal deliberately engineered to a "perfect" RR=10.0, to prove
+    # the evaluator can't be gamed through this field even if someone
+    # wired it in by accident.
+    with_engineered_proposal = evaluate(
+        _analysis(
+            proposal_has_proposal=True,
+            proposal_direction="LONG",
+            proposal_entry=100.0,
+            proposal_stop=99.99,
+            proposal_target=1000.0,
+        ),
+        params,
+    )
+
+    assert with_coherent_proposal == without_proposal
+    assert with_incoherent_proposal == without_proposal
+    assert with_engineered_proposal == without_proposal
+
+
+def test_evaluator_never_reads_proposal_attributes():
+    """Static confirmation alongside the behavioral one above: grepping
+    evals/trade_evaluator.py's source for any reference to the five
+    proposal_* attributes returns zero matches, the same style of check
+    Milestone 12's final review used for the prose fields."""
+    import inspect
+
+    import evals.trade_evaluator as trade_evaluator
+
+    source = inspect.getsource(trade_evaluator)
+    for attr in (
+        "proposal_has_proposal",
+        "proposal_direction",
+        "proposal_entry",
+        "proposal_stop",
+        "proposal_target",
+    ):
+        assert attr not in source
 
 
 # ---------------------------------------------------------------------------

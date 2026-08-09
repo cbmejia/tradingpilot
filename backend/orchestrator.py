@@ -88,7 +88,7 @@ from capture.base import CaptureResult, CaptureStatus
 from capture.manager import CaptureManager
 from database import crud
 from database.models import Run
-from evals.trade_evaluator import EvaluationResult, EvaluationStatus, evaluate
+from evals.trade_evaluator import EvaluationResult, EvaluationStatus, compute_risk_reward, evaluate
 from guardrails.rules import evaluate_guardrails
 from tools.market_data import MarketDataManager, MarketDataStatus, MarketQuote
 
@@ -194,6 +194,11 @@ def _skipped_agent_result(reason: str) -> AgentAnalysisResult:
         structure_quality=None,
         setup_quality=None,
         context_risk=None,
+        proposal_has_proposal=None,
+        proposal_direction=None,
+        proposal_entry=None,
+        proposal_stop=None,
+        proposal_target=None,
         timestamp=None,
         error_message=reason,
     )
@@ -277,6 +282,11 @@ def _forced_agent_result(force_scenario: str) -> AgentAnalysisResult:
             structure_quality=None,
             setup_quality=None,
             context_risk=None,
+            proposal_has_proposal=None,
+            proposal_direction=None,
+            proposal_entry=None,
+            proposal_stop=None,
+            proposal_target=None,
             timestamp=None,
             error_message=(
                 f"TESTING: agent deliberately forced to fail (force_scenario={force_scenario!r}) "
@@ -301,6 +311,13 @@ def _forced_agent_result(force_scenario: str) -> AgentAnalysisResult:
         structure_quality=profile["structure_quality"],
         setup_quality=profile["setup_quality"],
         context_risk=profile["context_risk"],
+        # A forced scenario never simulates a proposal -- always a clean
+        # decline, same as a real Claude call this mechanism never makes.
+        proposal_has_proposal=False,
+        proposal_direction=None,
+        proposal_entry=None,
+        proposal_stop=None,
+        proposal_target=None,
         timestamp=datetime.now(timezone.utc),
         error_message=None,
     )
@@ -316,6 +333,64 @@ def _market_data_summary(result: MarketQuote) -> str:
     if result.status == MarketDataStatus.SUCCESS:
         return f"Market data fetch succeeded ({result.mode.value} mode, price={result.price})."
     return f"Market data fetch failed ({result.mode.value} mode): {result.error_message}"
+
+
+def _persist_agent_proposal(session: Session, run_id: str, agent_result: AgentAnalysisResult) -> str:
+    """
+    7A Iteration 1. Called only for a SUCCESSFUL agent analysis -- the
+    only case where there's a real yes/no answer about whether the agent
+    proposed levels. Persists either a decline or a proposal, and returns
+    a short summary folded into the agent_analysis_finished audit event
+    (no new audit event type or stage is introduced -- this piggybacks on
+    the existing agent stage's own event).
+
+    Coherence is computed exactly once, right here, by calling
+    evals.trade_evaluator.compute_risk_reward() on the PROPOSED levels --
+    the same function guardrails/rules.py's TRADE_PARAMS_VALID rule
+    already reuses for the run's own trade params, not a second
+    implementation. This has no bearing on the current run's own
+    evaluation or guardrails: evals/trade_evaluator.py's evaluate() and
+    guardrails/rules.py's evaluate_guardrails() are never called with
+    anything proposal-related, and neither is touched by this function.
+    """
+    if not agent_result.proposal_has_proposal:
+        crud.add_declined_proposal(session, run_id=run_id)
+        return "No trade level proposal (agent declined)."
+
+    ratio, error = compute_risk_reward(
+        agent_result.proposal_direction,
+        agent_result.proposal_entry,
+        agent_result.proposal_stop,
+        agent_result.proposal_target,
+    )
+    levels = (
+        f"{agent_result.proposal_direction} entry={agent_result.proposal_entry}, "
+        f"stop={agent_result.proposal_stop}, target={agent_result.proposal_target}"
+    )
+    if error is None:
+        crud.add_agent_proposal(
+            session,
+            run_id=run_id,
+            direction=agent_result.proposal_direction,
+            entry=agent_result.proposal_entry,
+            stop=agent_result.proposal_stop,
+            target=agent_result.proposal_target,
+            is_coherent=True,
+            risk_reward_ratio=ratio,
+        )
+        return f"Agent proposed {levels} (coherent, risk/reward ratio={ratio:.2f})."
+
+    crud.add_agent_proposal(
+        session,
+        run_id=run_id,
+        direction=agent_result.proposal_direction,
+        entry=agent_result.proposal_entry,
+        stop=agent_result.proposal_stop,
+        target=agent_result.proposal_target,
+        is_coherent=False,
+        coherence_error=error,
+    )
+    return f"Agent proposed {levels} (incoherent: {error})."
 
 
 def _agent_summary(result: AgentAnalysisResult) -> str:
@@ -503,15 +578,20 @@ def run_pipeline(session: Session, run_id: str, *, force_scenario: Optional[str]
                 setup_quality=agent_result.setup_quality,
                 context_risk=agent_result.context_risk,
             )
+            proposal_summary = _persist_agent_proposal(session, run_id, agent_result)
         else:
             crud.add_failed_agent_analysis(
                 session, run_id=run_id, error_message=agent_result.error_message
             )
+            proposal_summary = None
+        finished_message = _agent_summary(agent_result)
+        if proposal_summary is not None:
+            finished_message = f"{finished_message} {proposal_summary}"
         crud.add_audit_event(
             session,
             run_id=run_id,
             event_type="agent_analysis_finished",
-            event_message=_agent_summary(agent_result),
+            event_message=finished_message,
         )
     else:
         agent_result = _skipped_agent_result(

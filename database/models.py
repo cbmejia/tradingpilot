@@ -52,6 +52,12 @@ def _categorical_allowed_check(column_name: str) -> str:
 # database/ stays a leaf module that doesn't import capture/ or tools/.
 MARKET_DATA_MODE_ALLOWED_VALUES: tuple[str, ...] = ("LIVE", "DEMO")
 
+# 7A Iteration 1: the two directions an agent-proposed trade level can
+# take. Duplicated from agents.trade_agent.ALLOWED_PROPOSAL_DIRECTIONS for
+# the same leaf-module reason as AGENT_CATEGORICAL_FIELDS above -- kept
+# from drifting apart by a dedicated test in tests/test_database.py.
+AGENT_PROPOSAL_DIRECTION_ALLOWED_VALUES: tuple[str, ...] = ("LONG", "SHORT")
+
 
 def _new_run_id() -> str:
     return uuid4().hex
@@ -88,6 +94,17 @@ class Run(Base):
     # what's allowed lives at the API boundary (backend/schemas.py) and in
     # backend/orchestrator.py, not here.
     status: Mapped[str] = mapped_column(String(30), default="pending")
+    # 7A Iteration 1: set only on a run created via POST
+    # /runs/{run_id}/accept-proposal -- points back at the run whose
+    # agent-proposed levels were accepted. Null for every ordinary run
+    # (including every run created before this iteration). A
+    # self-referential FK, not a relationship -- nothing in this codebase
+    # needs to walk from a run to its source run via the ORM; the
+    # accept-proposal endpoint already has both Run objects in hand at the
+    # moment it needs them.
+    accepted_from_run_id: Mapped[str | None] = mapped_column(
+        ForeignKey("runs.id"), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
     completed_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
 
@@ -111,6 +128,9 @@ class Run(Base):
     )
     audit_events: Mapped[list["AuditEvent"]] = relationship(
         back_populates="run", cascade="all, delete-orphan"
+    )
+    proposal: Mapped["AgentProposal | None"] = relationship(
+        back_populates="run", cascade="all, delete-orphan", uselist=False
     )
 
 
@@ -380,3 +400,88 @@ class AuditEvent(Base):
     timestamp: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
 
     run: Mapped["Run"] = relationship(back_populates="audit_events")
+
+
+class AgentProposal(Base):
+    """
+    The agent's own proposed entry/stop/target/direction for a run --
+    7A Iteration 1. Deliberately its own table, not new columns on
+    agent_analyses or evaluations: evals/trade_evaluator.py never reads
+    this table at all, so a proposal can never influence a score by
+    accident just because it happens to live next to data the evaluator
+    does read. See docs/handoff.md's "The 7A-specific invariant" for why
+    that separation is load-bearing, not stylistic.
+
+    run_id is unique -- a run is analyzed at most once (Milestone 10.5),
+    so it can have at most one proposal, populated (or explicitly
+    declined) at analysis time.
+
+    A row is only ever written when the agent analysis itself SUCCEEDED --
+    there's a real yes/no answer about whether the agent proposed levels
+    only once it actually produced qualitative output. No row at all means
+    the question was never reached (capture/market-data/agent all have to
+    succeed first); has_proposal=False means the agent was asked and
+    explicitly declined. Those are different facts, and only the second
+    one gets a row -- there is no third "not applicable" state to encode.
+
+    has_proposal=False rows have every other column NULL: no direction, no
+    levels, no ratio, no coherence note. has_proposal=True rows always have
+    direction/entry/stop/target populated, and then split on is_coherent:
+    a coherent proposal has risk_reward_ratio (computed once, in
+    backend/orchestrator.py, by calling evals/trade_evaluator.py's
+    compute_risk_reward() -- the exact same function guardrails/rules.py
+    already reuses for the user's own params, not a second implementation)
+    and a null coherence_error; an incoherent one (stop on the wrong side,
+    zero risk distance) has a null ratio and a real coherence_error
+    explaining why, exactly the same "never guess, always record the real
+    reason" rule compute_risk_reward() itself already follows for ordinary
+    trade params. The CHECK constraint below enforces this three-way shape
+    at the database level -- the same double-enforcement pattern (Python
+    validation in database/crud.py's add_agent_proposal(), a CHECK
+    constraint here as the backstop) every other validated column in this
+    file already uses.
+
+    risk_reward_ratio and coherence are informational only -- this table
+    has no bearing on the CURRENT run's own guardrails or evaluation.
+    Accepting a proposal (POST /runs/{run_id}/accept-proposal) is the only
+    way it becomes something that gets scored, and accepting it creates a
+    brand-new Run with these levels as ordinary Run.entry/stop/target
+    (see Run.accepted_from_run_id), never rescoring this run.
+    """
+
+    __tablename__ = "agent_proposals"
+    __table_args__ = (
+        CheckConstraint(
+            "direction IS NULL OR direction IN ('LONG', 'SHORT')",
+            name="ck_agent_proposals_direction_allowed",
+        ),
+        CheckConstraint(
+            "("
+            "has_proposal = 0 "
+            "AND direction IS NULL AND entry IS NULL AND stop IS NULL AND target IS NULL "
+            "AND risk_reward_ratio IS NULL AND is_coherent IS NULL AND coherence_error IS NULL"
+            ") OR ("
+            "has_proposal = 1 "
+            "AND direction IS NOT NULL AND entry IS NOT NULL AND stop IS NOT NULL "
+            "AND target IS NOT NULL AND is_coherent IS NOT NULL AND ("
+            "(is_coherent = 1 AND risk_reward_ratio IS NOT NULL AND coherence_error IS NULL) "
+            "OR "
+            "(is_coherent = 0 AND risk_reward_ratio IS NULL AND coherence_error IS NOT NULL)"
+            "))",
+            name="ck_agent_proposals_shape_matches_has_proposal",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(ForeignKey("runs.id"), unique=True)
+    has_proposal: Mapped[bool] = mapped_column(Boolean)
+    direction: Mapped[str | None] = mapped_column(String(10), nullable=True)  # "LONG" | "SHORT"
+    entry: Mapped[float | None] = mapped_column(Float, nullable=True)
+    stop: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target: Mapped[float | None] = mapped_column(Float, nullable=True)
+    risk_reward_ratio: Mapped[float | None] = mapped_column(Float, nullable=True)
+    is_coherent: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    coherence_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    timestamp: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
+
+    run: Mapped["Run"] = relationship(back_populates="proposal")

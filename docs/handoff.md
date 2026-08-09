@@ -23,21 +23,32 @@ duplicates: [docs/architecture.md](architecture.md),
 - **Latest commit:** `585f625` "chore: dry run sweep script for demo
   prep" (an operational script, `dry-run.ps1`, not a milestone or an
   iteration — no doc entry needed for it).
-- **7A has not started yet.** Iteration 1 (agent-proposed trade levels)
-  is in design: a schema (a new `agent_proposals` table, not new columns
-  on `agent_analyses`) and an endpoint shape
-  (`POST /runs/{run_id}/accept-proposal`) were proposed and are awaiting
-  confirmation before any code, schema migration, or test is written. See
-  "The 7A plan" and "The 7A-specific invariant" below before starting —
-  read them in full before writing a single line, since the whole
-  iteration hinges on where the numeric carve-out and the coherence check
-  are allowed to live. Iterations 2–4 haven't been designed at all yet.
-- **Test counts as of the truncation fix (last real run):** 224 backend
-  tests + 32 frontend tests, all passing. Backend: 33 database + 32 API +
-  17 capture + 19 market data + 31 agent + 32 evaluation + 36 guardrails
-  + 10 orchestrator + 14 failure scenarios. These will grow once 7A
-  Iteration 1 actually lands — treat this count as stale the moment any
-  7A code exists.
+- **7A Iteration 1 is complete.** Agent-proposed trade levels
+  (`agent_proposals` table, coherence checking in `backend/orchestrator.py`
+  reusing `evals/trade_evaluator.py`'s `compute_risk_reward()`,
+  `POST /runs/{run_id}/accept-proposal`) are built, tested, and manually
+  verified against a real running server. See the `## 7A Iteration 1 —
+  agent-proposed trade levels, never self-scored` entry in
+  [docs/iterations.md](iterations.md) for the full design, including two
+  hardening requirements added before the build started (code-level
+  rejection of any probability/confidence/percentage/likelihood/odds-named
+  field regardless of type, and explicit rejection of both directions of
+  a `proposal_has_proposal`/levels mismatch) — read that entry before
+  touching `agents/trade_agent.py`'s `_parse_response()` again, since both
+  requirements are about the enforcement being in code, not just the
+  prompt. **The frontend has no UI for proposals yet** — deliberately
+  deferred, same pattern 6C used for every pipeline tool before Milestone
+  11 wired the UI up; not scheduled.
+- **7A Iteration 2 (multi-timeframe capture + cross-timeframe agreement
+  guardrail) has not started.** Awaiting a go-ahead per the "one iteration
+  at a time" working agreement below. Iterations 3–4 haven't been
+  designed at all yet.
+- **Test counts as of 7A Iteration 1 (last real run):** 271 backend tests
+  + 32 frontend tests, all passing. Backend: 46 database + 32 API + 17
+  capture + 19 market data + 53 agent + 34 evaluation + 36 guardrails +
+  20 orchestrator + 14 failure scenarios. These will grow once 7A
+  Iteration 2 lands — treat this count as stale the moment more 7A code
+  exists.
 
 ## 2. The 7A plan
 
@@ -51,11 +62,14 @@ milestones.
    agent proposes an entry/stop/target/direction: an *alternative* when
    the user supplied their own levels, or its own idea when the user
    supplied none. The proposal is stored separately from anything
-   `evals/trade_evaluator.py` reads, shown for comparison, and only
-   becomes real scored input when a human explicitly accepts it — which
-   creates a brand-new run. See "The 7A-specific invariant" below; this
-   is the entire reason the iteration is designed the way it is.
-   **In progress — design proposed, not yet confirmed or built.**
+   `evals/trade_evaluator.py` reads, only becomes real scored input when a
+   human explicitly accepts it via `POST /runs/{run_id}/accept-proposal`
+   — which creates a brand-new run — and is *not yet* shown for
+   comparison in the UI (deliberately deferred; see below). See "The
+   7A-specific invariant" below; this is the entire reason the iteration
+   is designed the way it is. **Complete — backend built, tested (271
+   backend tests, up from 224), and manually verified against a real
+   running server. Tagged `7a-iteration-1`.**
 2. **Iteration 2 — multi-timeframe capture + cross-timeframe agreement
    guardrail.** Not yet designed.
 3. **Iteration 3 — economic calendar tool + event-proximity block.**
@@ -94,8 +108,13 @@ otherwise. Concretely —
   `evals/trade_evaluator.py` at all. A test proves this directly — the
   evaluator's behavior on a run with a stored proposal must be identical
   to its behavior on a run with none.
-- Proposed levels are displayed to a human for comparison, alongside the
-  user's own levels when both exist — never merged into the same score.
+- Proposed levels are available via `GET /runs/{run_id}` (the `proposal`
+  field, alongside the user's own levels on the same response) for a
+  human to compare — never merged into the same score. **The frontend
+  doesn't render this yet** — `GET /runs/{run_id}` returning it is done;
+  a UI panel showing it side-by-side with the user's own levels is
+  deliberately deferred, the same "build the tool standalone before
+  wiring the UI" pattern 6C used throughout. Not scheduled.
 - The *only* way a proposal becomes something that gets scored is a
   human explicitly accepting it, and accepting it doesn't score the
   original run — it creates a **new** run, with the accepted levels

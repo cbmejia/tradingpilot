@@ -80,6 +80,11 @@ def _good_agent_result(**overrides) -> AgentAnalysisResult:
         structure_quality="CLEAN",
         setup_quality="ACCEPTABLE",
         context_risk="LOW",
+        proposal_has_proposal=False,
+        proposal_direction=None,
+        proposal_entry=None,
+        proposal_stop=None,
+        proposal_target=None,
         timestamp=datetime.now(timezone.utc),
         error_message=None,
     )
@@ -100,6 +105,11 @@ def _failed_agent_result(message="Claude's response could not be used: malformed
         structure_quality=None,
         setup_quality=None,
         context_risk=None,
+        proposal_has_proposal=None,
+        proposal_direction=None,
+        proposal_entry=None,
+        proposal_stop=None,
+        proposal_target=None,
         timestamp=None,
         error_message=message,
     )
@@ -461,6 +471,219 @@ def test_analyzing_an_already_analyzed_run_is_refused_and_original_results_uncha
 
 def test_analyzing_a_nonexistent_run_returns_404(client):
     response = client.post("/runs/does-not-exist/analyze")
+
+    assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 7A Iteration 1 -- agent-proposed trade levels, never self-scored.
+# Coherence is computed once, in the orchestrator, by reusing
+# evals.trade_evaluator.compute_risk_reward() -- the same function
+# guardrails/rules.py already reuses for the run's own trade params.
+# ---------------------------------------------------------------------------
+
+
+def test_agent_proposing_coherent_levels_is_recorded_and_does_not_affect_scoring(client):
+    created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
+
+    proposing_agent = _good_agent_result(
+        proposal_has_proposal=True,
+        proposal_direction="LONG",
+        proposal_entry=1.1000,
+        proposal_stop=1.0950,
+        proposal_target=1.1100,
+    )
+    with _patched_agent(proposing_agent):
+        response = client.post(f"/runs/{created['id']}/analyze")
+
+    assert response.status_code == 200
+    body = response.json()
+
+    proposal = body["proposal"]
+    assert proposal["has_proposal"] is True
+    assert proposal["direction"] == "LONG"
+    assert proposal["entry"] == 1.1000
+    assert proposal["stop"] == 1.0950
+    assert proposal["target"] == 1.1100
+    assert proposal["is_coherent"] is True
+    assert proposal["risk_reward_ratio"] == pytest.approx(2.0)
+    assert proposal["coherence_error"] is None
+
+    # The proposal never touches this run's own evaluation -- identical
+    # total_score (76) to the non-proposal happy path in
+    # test_every_stage_result_is_persisted_and_readable_via_get_run above,
+    # computed from GOOD_RUN_PAYLOAD's own entry/stop/target, not the
+    # proposal's.
+    assert body["evaluations"][0]["total_score"] == 76
+    assert body["evaluations"][0]["risk_reward_ratio"] == pytest.approx(2.0)
+
+    # Nor this run's own guardrails -- TRADE_PARAMS_VALID reads the run's
+    # OWN trade params, never the proposal.
+    trade_params_check = next(
+        g for g in body["guardrail_results"] if g["guardrail_name"] == "TRADE_PARAMS_VALID"
+    )
+    assert trade_params_check["passed"] is True
+
+
+def test_agent_proposing_incoherent_levels_is_recorded_with_a_reason(client):
+    created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
+
+    proposing_agent = _good_agent_result(
+        proposal_has_proposal=True,
+        proposal_direction="LONG",
+        proposal_entry=1.0950,
+        proposal_stop=1.1000,  # stop above entry on a LONG -- incoherent
+        proposal_target=1.1050,
+    )
+    with _patched_agent(proposing_agent):
+        response = client.post(f"/runs/{created['id']}/analyze")
+
+    assert response.status_code == 200
+    body = response.json()
+
+    proposal = body["proposal"]
+    assert proposal["has_proposal"] is True
+    assert proposal["is_coherent"] is False
+    assert proposal["risk_reward_ratio"] is None
+    assert "wrong side" in proposal["coherence_error"]
+
+    # Still doesn't affect this run's own (coherent) evaluation/guardrails.
+    assert body["evaluations"][0]["total_score"] == 76
+    trade_params_check = next(
+        g for g in body["guardrail_results"] if g["guardrail_name"] == "TRADE_PARAMS_VALID"
+    )
+    assert trade_params_check["passed"] is True
+
+
+def test_agent_declining_a_proposal_is_recorded(client):
+    created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
+
+    with _patched_agent(_good_agent_result()):  # declines by default
+        response = client.post(f"/runs/{created['id']}/analyze")
+
+    body = response.json()
+    assert body["proposal"]["has_proposal"] is False
+    assert body["proposal"]["direction"] is None
+    assert body["proposal"]["risk_reward_ratio"] is None
+    assert body["proposal"]["is_coherent"] is None
+
+
+def test_agent_analysis_finished_audit_event_mentions_the_proposal_outcome(client):
+    created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
+
+    with _patched_agent(_good_agent_result()):
+        client.post(f"/runs/{created['id']}/analyze")
+
+    full_run = client.get(f"/runs/{created['id']}").json()
+    finished_event = next(
+        e for e in full_run["audit_events"] if e["event_type"] == "agent_analysis_finished"
+    )
+    assert "declined" in finished_event["event_message"].lower()
+
+
+# ---------------------------------------------------------------------------
+# 7A Iteration 1 -- POST /runs/{run_id}/accept-proposal
+# ---------------------------------------------------------------------------
+
+
+def test_accept_proposal_creates_a_new_run_with_provenance(client):
+    created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
+    proposing_agent = _good_agent_result(
+        proposal_has_proposal=True,
+        proposal_direction="LONG",
+        proposal_entry=1.1000,
+        proposal_stop=1.0950,
+        proposal_target=1.1100,
+    )
+    with _patched_agent(proposing_agent):
+        client.post(f"/runs/{created['id']}/analyze")
+
+    response = client.post(f"/runs/{created['id']}/accept-proposal")
+
+    assert response.status_code == 201
+    body = response.json()
+    assert body["id"] != created["id"]
+    assert body["accepted_from_run_id"] == created["id"]
+    assert body["symbol"] == "EURUSD"
+    assert body["timeframe"] == "1h"
+    assert body["direction"] == "LONG"
+    assert body["entry"] == 1.1000
+    assert body["stop"] == 1.0950
+    assert body["target"] == 1.1100
+    assert body["status"] == "CREATED"
+
+    new_run = client.get(f"/runs/{body['id']}").json()
+    assert new_run["accepted_from_run_id"] == created["id"]
+    assert new_run["entry"] == 1.1000
+    new_run_event_types = [e["event_type"] for e in new_run["audit_events"]]
+    assert "accepted_from_proposal" in new_run_event_types
+
+    source_run = client.get(f"/runs/{created['id']}").json()
+    source_event_types = [e["event_type"] for e in source_run["audit_events"]]
+    assert "proposal_accepted" in source_event_types
+    # Accepting a proposal never rescores or reruns the source run -- its
+    # own evaluation is exactly what it was before accepting.
+    assert source_run["evaluations"][0]["total_score"] == 76
+
+
+def test_accept_proposal_can_accept_an_incoherent_proposal(client):
+    """Accepting doesn't imply endorsing the math -- an incoherent
+    proposal can still be accepted, exactly as a human could type in bad
+    numbers themselves; the new run just carries those same numbers and
+    will fail TRADE_PARAMS_VALID once analyzed."""
+    created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
+    proposing_agent = _good_agent_result(
+        proposal_has_proposal=True,
+        proposal_direction="LONG",
+        proposal_entry=1.0950,
+        proposal_stop=1.1000,  # incoherent
+        proposal_target=1.1050,
+    )
+    with _patched_agent(proposing_agent):
+        client.post(f"/runs/{created['id']}/analyze")
+
+    response = client.post(f"/runs/{created['id']}/accept-proposal")
+
+    assert response.status_code == 201
+    assert response.json()["stop"] == 1.1000
+
+
+def test_accept_proposal_on_a_declined_run_is_refused(client):
+    created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
+    with _patched_agent(_good_agent_result()):  # declines by default
+        client.post(f"/runs/{created['id']}/analyze")
+
+    response = client.post(f"/runs/{created['id']}/accept-proposal")
+
+    assert response.status_code == 409
+    assert "no agent-proposed" in response.json()["detail"].lower()
+
+
+def test_accept_proposal_on_a_run_with_no_proposal_row_at_all_is_refused(client):
+    """A failed capture means the agent is never called, so there's no
+    AgentProposal row at all -- not even a declined one."""
+    created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
+    mock_agent = MagicMock()
+    with _patched_capture_manager(_failed_capture()), patch(
+        "backend.orchestrator.TradeAgent", return_value=mock_agent
+    ):
+        client.post(f"/runs/{created['id']}/analyze")
+
+    response = client.post(f"/runs/{created['id']}/accept-proposal")
+
+    assert response.status_code == 409
+
+
+def test_accept_proposal_on_an_unanalyzed_run_is_refused(client):
+    created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
+
+    response = client.post(f"/runs/{created['id']}/accept-proposal")
+
+    assert response.status_code == 409
+
+
+def test_accept_proposal_on_a_nonexistent_run_returns_404(client):
+    response = client.post("/runs/does-not-exist/accept-proposal")
 
     assert response.status_code == 404
 

@@ -26,6 +26,20 @@
 # scores verbosity, not setup quality. The prose fields
 # (analysis_text/trend_assessment/structure_assessment/setup_assessment)
 # stay for the human reviewer to read; they no longer drive any score.
+#
+# 7A Iteration 1 note: proposal_entry/proposal_stop/proposal_target are a
+# narrow, explicit numeric carve-out -- the ONLY three field names this
+# module ever accepts a real number from. That carve-out is enforced here,
+# not just requested in the prompt: proposal_has_proposal must be a real
+# JSON boolean (never 0/1/"true"/"yes"), the three numeric fields and
+# proposal_direction must be null when proposal_has_proposal is false and
+# fully populated (and coherent-looking types) when it's true -- any other
+# combination rejects the whole response, same as every other malformed
+# shape. A response carrying any field whose NAME looks like a smuggled
+# probability/confidence/percentage/likelihood/odds is rejected outright,
+# whatever its value type -- see SCORE_LIKE_KEYWORDS below. None of this
+# widens what evals/trade_evaluator.py reads; see docs/handoff.md's "The
+# 7A-specific invariant" for why the carve-out has to stay this narrow.
 
 from __future__ import annotations
 
@@ -86,7 +100,28 @@ CATEGORICAL_FIELDS = {
     "context_risk": {"LOW", "MODERATE", "ELEVATED", "UNCLEAR"},
 }
 
-EXPECTED_FIELDS = set(TEXT_FIELDS) | {"uncertainty"} | set(CATEGORICAL_FIELDS)
+# 7A Iteration 1 -- the agent's proposed trade levels. proposal_has_proposal
+# is the only field that decides whether the other four are expected to be
+# populated or null; see _parse_response()'s "proposal shape" section for
+# the exact both-directions rejection this enables (a malformed response,
+# never coerced into whichever state looks closest).
+PROPOSAL_HAS_PROPOSAL_FIELD = "proposal_has_proposal"
+PROPOSAL_DIRECTION_FIELD = "proposal_direction"
+PROPOSAL_NUMERIC_FIELDS = ("proposal_entry", "proposal_stop", "proposal_target")
+ALLOWED_PROPOSAL_DIRECTIONS = {"LONG", "SHORT"}
+PROPOSAL_FIELDS = {PROPOSAL_HAS_PROPOSAL_FIELD, PROPOSAL_DIRECTION_FIELD} | set(PROPOSAL_NUMERIC_FIELDS)
+
+# Any EXTRA field (not one of the fields this module already expects)
+# whose name contains one of these words is rejected outright, regardless
+# of its value's type -- a string "confidence": "high" is just as much an
+# attempted score-substitute as a numeric "confidence_score": 87. This is
+# enforcement in addition to the numeric-extra-field check below, not a
+# replacement for it: the numeric check catches an unnamed number, this
+# catches a named-but-not-yet-numeric probability/confidence field before
+# it ever gets the chance to be one.
+SCORE_LIKE_KEYWORDS = ("probability", "percent", "confidence", "likelihood", "odds")
+
+EXPECTED_FIELDS = set(TEXT_FIELDS) | {"uncertainty"} | set(CATEGORICAL_FIELDS) | PROPOSAL_FIELDS
 
 
 class AgentAnalysisStatus(str, Enum):
@@ -121,6 +156,18 @@ class AgentAnalysisResult:
     any score. trend_direction/trend_quality/structure_quality/
     setup_quality/context_risk are the fixed-category fields the
     evaluation engine (evals/trade_evaluator.py) actually scores from.
+
+    proposal_has_proposal/proposal_direction/proposal_entry/proposal_stop/
+    proposal_target (7A Iteration 1) are the agent's own alternative or
+    original entry/stop/target/direction idea -- never read by
+    evals/trade_evaluator.py, never scored, never merged with the user's
+    own trade params. proposal_has_proposal is always a real bool once
+    status is SUCCESS (never None); the other four are either all
+    populated (a real proposal) or all None (the agent declined) --
+    _parse_response() rejects any response that doesn't match one of
+    those two shapes exactly, so this dataclass can never end up
+    half-populated. All five are None when status is FAILED, same as
+    every other qualitative field.
     """
 
     status: AgentAnalysisStatus
@@ -134,6 +181,11 @@ class AgentAnalysisResult:
     structure_quality: Optional[str]  # "CLEAN" | "MIXED" | "CHOPPY" | "UNCLEAR"
     setup_quality: Optional[str]  # "TEXTBOOK" | "ACCEPTABLE" | "MARGINAL" | "NONE" | "UNCLEAR"
     context_risk: Optional[str]  # "LOW" | "MODERATE" | "ELEVATED" | "UNCLEAR"
+    proposal_has_proposal: Optional[bool]  # None only when status is FAILED
+    proposal_direction: Optional[str]  # "LONG" | "SHORT", or None
+    proposal_entry: Optional[float]
+    proposal_stop: Optional[float]
+    proposal_target: Optional[float]
     timestamp: Optional[datetime]
     error_message: Optional[str] = None
 
@@ -213,17 +265,28 @@ def _parse_response(raw_text: str) -> dict:
         raise ValueError(f"response is missing required field(s): {sorted(missing)}")
 
     # THE HARD BOUNDARY: any extra field carrying a number is treated as
-    # an attempted score and rejects the whole response.
+    # an attempted score and rejects the whole response. An extra field
+    # is also rejected purely by NAME if it looks like a smuggled
+    # probability/confidence/percentage/likelihood/odds, regardless of
+    # whether its value happens to be numeric yet -- "confidence": "high"
+    # is exactly as much a violation as "confidence_score": 87, and this
+    # is what makes that a code-enforced rule rather than a prompt request.
     extra_keys = set(data.keys()) - EXPECTED_FIELDS
     numeric_extras = [
         key
         for key in extra_keys
         if isinstance(data[key], (int, float)) and not isinstance(data[key], bool)
     ]
-    if numeric_extras:
+    score_like_extras = [
+        key for key in extra_keys if any(keyword in key.lower() for keyword in SCORE_LIKE_KEYWORDS)
+    ]
+    suspicious_extras = sorted(set(numeric_extras) | set(score_like_extras))
+    if suspicious_extras:
         raise ValueError(
-            f"response included numeric field(s) {sorted(numeric_extras)} -- the agent "
-            f"never accepts a score, rating, or confidence number from the model"
+            f"response included numeric field(s) or field(s) named like a smuggled score, "
+            f"rating, probability, or confidence value: {suspicious_extras} -- the agent "
+            f"never accepts a score, rating, or confidence number (or word) from the model, "
+            f"under any field name"
         )
 
     text_fields: dict[str, str] = {}
@@ -260,7 +323,88 @@ def _parse_response(raw_text: str) -> dict:
             raise ValueError(f"'{key}' must be one of {sorted(allowed_values)}, got {value!r}")
         categorical_fields[key] = normalized
 
-    return {**text_fields, "uncertainty": uncertainty, **categorical_fields}
+    # --- 7A Iteration 1: the proposal shape ---
+    #
+    # proposal_has_proposal must be a real JSON boolean -- isinstance(x,
+    # bool) rather than a truthiness check, because Python's bool is a
+    # subclass of int (isinstance(1, bool) is False, but a truthiness
+    # check would treat 1 the same as True). This is what makes 0, 1,
+    # "true", and "yes" all rejected rather than silently accepted as
+    # boolean-ish.
+    has_proposal_raw = data[PROPOSAL_HAS_PROPOSAL_FIELD]
+    if not isinstance(has_proposal_raw, bool):
+        raise ValueError(
+            f"'{PROPOSAL_HAS_PROPOSAL_FIELD}' must be a JSON boolean (true or false), got "
+            f"a {type(has_proposal_raw).__name__}: {has_proposal_raw!r}"
+        )
+
+    direction_raw = data[PROPOSAL_DIRECTION_FIELD]
+    numeric_raw = {key: data[key] for key in PROPOSAL_NUMERIC_FIELDS}
+
+    if has_proposal_raw:
+        # A real proposal: direction and all three numeric fields must be
+        # present and correctly typed. Never coerced -- a null level, a
+        # numeric-looking string, or an out-of-set direction here rejects
+        # the whole response, the same "reject, don't guess" rule every
+        # other field in this function follows.
+        if not isinstance(direction_raw, str):
+            raise ValueError(
+                f"'{PROPOSAL_DIRECTION_FIELD}' must be text when {PROPOSAL_HAS_PROPOSAL_FIELD} "
+                f"is true, got {type(direction_raw).__name__}"
+            )
+        direction_normalized = direction_raw.strip().upper()
+        if direction_normalized not in ALLOWED_PROPOSAL_DIRECTIONS:
+            raise ValueError(
+                f"'{PROPOSAL_DIRECTION_FIELD}' must be one of "
+                f"{sorted(ALLOWED_PROPOSAL_DIRECTIONS)}, got {direction_raw!r}"
+            )
+        proposal_numeric: dict[str, float] = {}
+        for key, value in numeric_raw.items():
+            if value is None:
+                raise ValueError(
+                    f"'{key}' must be a number when {PROPOSAL_HAS_PROPOSAL_FIELD} is true, "
+                    f"got null"
+                )
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ValueError(
+                    f"'{key}' must be a number when {PROPOSAL_HAS_PROPOSAL_FIELD} is true, "
+                    f"got {type(value).__name__}"
+                )
+            proposal_numeric[key] = float(value)
+        proposal_fields = {
+            "proposal_has_proposal": True,
+            "proposal_direction": direction_normalized,
+            "proposal_entry": proposal_numeric["proposal_entry"],
+            "proposal_stop": proposal_numeric["proposal_stop"],
+            "proposal_target": proposal_numeric["proposal_target"],
+        }
+    else:
+        # A decline: this is a real, valid answer (not an error, and not
+        # the same as omitting the fields) -- but direction and all three
+        # numeric fields must be null. A response that says "no proposal"
+        # while still carrying levels is malformed, not a proposal in
+        # disguise -- rejected outright, never silently trusted as either
+        # state.
+        if direction_raw is not None:
+            raise ValueError(
+                f"'{PROPOSAL_DIRECTION_FIELD}' must be null when "
+                f"{PROPOSAL_HAS_PROPOSAL_FIELD} is false, got {direction_raw!r}"
+            )
+        for key, value in numeric_raw.items():
+            if value is not None:
+                raise ValueError(
+                    f"'{key}' must be null when {PROPOSAL_HAS_PROPOSAL_FIELD} is false, "
+                    f"got {value!r}"
+                )
+        proposal_fields = {
+            "proposal_has_proposal": False,
+            "proposal_direction": None,
+            "proposal_entry": None,
+            "proposal_stop": None,
+            "proposal_target": None,
+        }
+
+    return {**text_fields, "uncertainty": uncertainty, **categorical_fields, **proposal_fields}
 
 
 class TradeAgent:
@@ -404,6 +548,11 @@ class TradeAgent:
             structure_quality=parsed["structure_quality"],
             setup_quality=parsed["setup_quality"],
             context_risk=parsed["context_risk"],
+            proposal_has_proposal=parsed["proposal_has_proposal"],
+            proposal_direction=parsed["proposal_direction"],
+            proposal_entry=parsed["proposal_entry"],
+            proposal_stop=parsed["proposal_stop"],
+            proposal_target=parsed["proposal_target"],
             timestamp=datetime.now(timezone.utc),
             error_message=None,
         )
@@ -421,6 +570,11 @@ class TradeAgent:
             structure_quality=None,
             setup_quality=None,
             context_risk=None,
+            proposal_has_proposal=None,
+            proposal_direction=None,
+            proposal_entry=None,
+            proposal_stop=None,
+            proposal_target=None,
             timestamp=None,
             error_message=message,
         )

@@ -59,6 +59,11 @@ def _good_analysis(**overrides) -> AgentAnalysisResult:
         structure_quality="CLEAN",
         setup_quality="TEXTBOOK",
         context_risk="LOW",
+        proposal_has_proposal=False,
+        proposal_direction=None,
+        proposal_entry=None,
+        proposal_stop=None,
+        proposal_target=None,
         timestamp=NOW - timedelta(seconds=5),
         error_message=None,
     )
@@ -280,6 +285,11 @@ def test_analysis_succeeded_fails_and_blocks_on_failed_analysis():
         structure_quality=None,
         setup_quality=None,
         context_risk=None,
+        proposal_has_proposal=None,
+        proposal_direction=None,
+        proposal_entry=None,
+        proposal_stop=None,
+        proposal_target=None,
         timestamp=None,
         error_message="No chart to analyze.",
     )

@@ -18,8 +18,10 @@ from sqlalchemy.orm import Session
 
 from database.models import (
     AGENT_CATEGORICAL_FIELDS,
+    AGENT_PROPOSAL_DIRECTION_ALLOWED_VALUES,
     MARKET_DATA_MODE_ALLOWED_VALUES,
     AgentAnalysis,
+    AgentProposal,
     AuditEvent,
     Capture,
     Evaluation,
@@ -65,6 +67,22 @@ def _validate_categorical_fields(**fields: Optional[str]) -> None:
             raise ValueError(f"{name}={value!r} is not one of the allowed values {allowed}")
 
 
+def _validate_proposal_direction(direction: str) -> None:
+    """
+    Application-level half of the proposal-direction check (the other
+    half is the CHECK constraint on AgentProposal in database/models.py)
+    -- same defense-in-depth reasoning as _validate_categorical_fields()
+    above. agents/trade_agent.py's own _parse_response() already rejects
+    an out-of-set direction before an analysis is ever accepted as
+    SUCCESS, so in the normal path this never fires.
+    """
+    if direction not in AGENT_PROPOSAL_DIRECTION_ALLOWED_VALUES:
+        raise ValueError(
+            f"direction={direction!r} is not one of the allowed values "
+            f"{AGENT_PROPOSAL_DIRECTION_ALLOWED_VALUES}"
+        )
+
+
 def create_run(
     session: Session,
     *,
@@ -75,7 +93,15 @@ def create_run(
     stop: Optional[float] = None,
     target: Optional[float] = None,
     status: str = "pending",
+    accepted_from_run_id: Optional[str] = None,
 ) -> Run:
+    """
+    accepted_from_run_id (7A Iteration 1): set only by
+    POST /runs/{run_id}/accept-proposal, pointing back at the run whose
+    agent-proposed levels became this run's own entry/stop/target. None
+    (the default, and the only value every ordinary POST /runs call ever
+    uses) for a ordinary, hand-entered run.
+    """
     run = Run(
         symbol=symbol,
         timeframe=timeframe,
@@ -84,6 +110,7 @@ def create_run(
         stop=stop,
         target=target,
         status=status,
+        accepted_from_run_id=accepted_from_run_id,
     )
     session.add(run)
     session.commit()
@@ -428,3 +455,82 @@ def add_audit_event(
     session.commit()
     session.refresh(event)
     return event
+
+
+def add_agent_proposal(
+    session: Session,
+    *,
+    run_id: str,
+    direction: str,
+    entry: float,
+    stop: float,
+    target: float,
+    is_coherent: bool,
+    risk_reward_ratio: Optional[float] = None,
+    coherence_error: Optional[str] = None,
+) -> AgentProposal:
+    """
+    Record the agent's proposed trade levels for a run -- has_proposal is
+    always True here; for a decline, see add_declined_proposal() below.
+
+    is_coherent, and exactly one of risk_reward_ratio/coherence_error, are
+    required together: a coherent proposal has a real ratio and no error;
+    an incoherent one has a real error and no ratio. Callers (backend/
+    orchestrator.py) compute both by calling
+    evals.trade_evaluator.compute_risk_reward() on the proposed levels --
+    this function stores whatever that returned, it doesn't recompute it,
+    for the same "don't risk two numbers disagreeing" reason
+    add_evaluation() stores risk_reward_ratio as-is.
+    """
+    _validate_proposal_direction(direction)
+    if is_coherent:
+        if risk_reward_ratio is None:
+            raise ValueError("risk_reward_ratio is required when is_coherent is True")
+        if coherence_error is not None:
+            raise ValueError("coherence_error must be None when is_coherent is True")
+    else:
+        if coherence_error is None:
+            raise ValueError("coherence_error is required when is_coherent is False")
+        if risk_reward_ratio is not None:
+            raise ValueError("risk_reward_ratio must be None when is_coherent is False")
+
+    proposal = AgentProposal(
+        run_id=run_id,
+        has_proposal=True,
+        direction=direction,
+        entry=entry,
+        stop=stop,
+        target=target,
+        risk_reward_ratio=risk_reward_ratio,
+        is_coherent=is_coherent,
+        coherence_error=coherence_error,
+    )
+    session.add(proposal)
+    session.commit()
+    session.refresh(proposal)
+    return proposal
+
+
+def add_declined_proposal(session: Session, *, run_id: str) -> AgentProposal:
+    """
+    Record that the agent was asked and explicitly declined to propose
+    trade levels for a run -- has_proposal=False, every other field null.
+    A real, complete answer, not an error and not the same as no row at
+    all (which means the question was never reached -- see AgentProposal's
+    docstring in database/models.py).
+    """
+    proposal = AgentProposal(
+        run_id=run_id,
+        has_proposal=False,
+        direction=None,
+        entry=None,
+        stop=None,
+        target=None,
+        risk_reward_ratio=None,
+        is_coherent=None,
+        coherence_error=None,
+    )
+    session.add(proposal)
+    session.commit()
+    session.refresh(proposal)
+    return proposal

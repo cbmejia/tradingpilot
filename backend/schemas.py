@@ -150,6 +150,34 @@ class EvaluationOut(BaseModel):
     timestamp: datetime
 
 
+class AgentProposalOut(BaseModel):
+    """
+    7A Iteration 1. has_proposal=False means the agent was asked and
+    declined -- direction/entry/stop/target/risk_reward_ratio/is_coherent/
+    coherence_error are all null in that case, never a fabricated
+    placeholder. has_proposal=True always has direction/entry/stop/target
+    populated, and then either risk_reward_ratio (coherent) or
+    coherence_error (incoherent) populated, never both.
+
+    This is informational only -- it never appears anywhere
+    evals/trade_evaluator.py or guardrails/rules.py reads from for this
+    run's own score or guardrail outcome.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    has_proposal: bool
+    direction: Optional[str]
+    entry: Optional[float]
+    stop: Optional[float]
+    target: Optional[float]
+    risk_reward_ratio: Optional[float]
+    is_coherent: Optional[bool]
+    coherence_error: Optional[str]
+    timestamp: datetime
+
+
 class GuardrailResultOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -193,6 +221,11 @@ class RunSummary(BaseModel):
     status: str
     created_at: datetime
     completed_at: Optional[datetime]
+    # 7A Iteration 1: set only on a run created via
+    # POST /runs/{run_id}/accept-proposal -- the id of the run whose
+    # agent-proposed levels became this run's own entry/stop/target. Null
+    # for every ordinary, hand-entered run.
+    accepted_from_run_id: Optional[str] = None
 
 
 class RunDetail(RunSummary):
@@ -207,6 +240,10 @@ class RunDetail(RunSummary):
     guardrail_results: list[GuardrailResultOut] = []
     human_review: Optional[HumanReviewOut] = None
     audit_events: list[AuditEventOut] = []
+    # 7A Iteration 1: None if the agent analysis never succeeded (so the
+    # question of a proposal was never reached) -- see AgentProposalOut
+    # for the has_proposal=False vs. absent distinction.
+    proposal: Optional[AgentProposalOut] = None
 
     # Derived, not a database column: "BLOCKED" / "REQUIRES_REVIEW" /
     # "READY_FOR_REVIEW", computed from guardrail_results above using the
@@ -263,3 +300,27 @@ class RunListResponse(BaseModel):
     limit: int
     offset: int
     total: int
+
+
+# --- Accept a proposal (7A Iteration 1) ---
+
+
+class AcceptProposalResponse(BaseModel):
+    """
+    What POST /runs/{run_id}/accept-proposal sends back: the brand-new
+    run it just created. This never touches the source run's own score or
+    guardrail outcome -- the accepted levels become this new run's
+    ordinary Run.entry/stop/target, indistinguishable from a run someone
+    typed in by hand, except for accepted_from_run_id recording where they
+    actually came from.
+    """
+
+    id: str
+    accepted_from_run_id: str
+    symbol: str
+    timeframe: str
+    direction: str
+    entry: float
+    stop: float
+    target: float
+    status: str

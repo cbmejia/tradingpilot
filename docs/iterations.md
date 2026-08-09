@@ -2017,6 +2017,234 @@ failing; `SYNTHETIC_DATA` correctly *passing* since this run was
 genuinely LIVE-sourced, not `DEMO`). No truncation, no JSON error. Dev
 database and `.env` both reset afterward.
 
+## 7A Iteration 1 — agent-proposed trade levels, never self-scored
+
+The first 7A iteration. The design (a new `agent_proposals` table, not new
+columns on `agent_analyses`; coherence checking done once in
+`backend/orchestrator.py` by reusing `evals/trade_evaluator.py`'s
+`compute_risk_reward()`; an accept-proposal endpoint that creates a new
+run rather than rescoring the old one) was proposed and confirmed before
+any code was written — see "The 7A plan" and "The 7A-specific invariant"
+in [docs/handoff.md](handoff.md), which this entry doesn't repeat.
+
+**The tension this iteration exists to resolve.** `risk_reward_score` is
+the one rubric component computed purely from arithmetic on real
+numbers — every other component is capped by the agent's own stated
+uncertainty, but Risk/Reward is exempt, because it's a fact about numbers
+the user typed in, not a reading of an ambiguous chart. That exemption
+only holds because the agent has zero influence over which numbers go
+into that arithmetic. The moment the agent is allowed to propose its own
+entry/stop/target, an agent that wanted to game the rubric could simply
+propose levels arithmetically engineered to `RR = 2.0` or higher and
+guarantee itself the one component uncertainty can't touch. So a
+proposal has to be able to exist without ever becoming scoring input
+until a human explicitly says otherwise — that's the entire shape of
+this iteration.
+
+**Two hardening requirements were added to the approved design before any
+code was written, both aimed at the same thing: a rule that only lives in
+a prompt isn't a rule, it's a request.**
+
+1. **The numeric carve-out needed enforcement, not just a prompt
+   instruction.** The original plan already had `_parse_response()`
+   reject any numeric field except the three proposal fields — but
+   nothing stopped a field NAMED `probability`/`confidence`/`percentage`/
+   `likelihood`/`odds` from slipping through as long as its *value*
+   wasn't numeric yet (`"confidence": "high"` is exactly as much an
+   attempted score-substitute as `"confidence_score": 87`, and the
+   pre-existing numeric-extra-field check only ever looked at value
+   types). Fixed by adding a keyword-based rejection alongside the
+   numeric one: any extra field whose name contains `probability`,
+   `percent`, `confidence`, `likelihood`, or `odds` is rejected outright,
+   regardless of its value's type. Both checks now feed one unified
+   error path in `agents/trade_agent.py`'s `_parse_response()`.
+2. **A fourth state the original three-state design didn't cover.**
+   `proposal_has_proposal` and the four level fields
+   (`proposal_direction`/`proposal_entry`/`proposal_stop`/
+   `proposal_target`) can, in principle, disagree with each other:
+   `has_proposal=false` with levels populated, or `has_proposal=true`
+   with a level left `null`. Neither is "declined" or "accepted" — both
+   are a malformed response, and `_parse_response()` now rejects both
+   directions explicitly rather than coercing either one into whichever
+   state looks closest. `proposal_has_proposal` itself also has to be a
+   real JSON boolean — checked with `isinstance(x, bool)`, not a
+   truthiness test, specifically because Python's `bool` is a subclass of
+   `int` (`isinstance(1, bool)` is `False`) — so `0`, `1`, `"true"`, and
+   `"yes"` are all rejected rather than silently treated as boolean-ish.
+
+**Schema (`database/models.py`):** a new `agent_proposals` table,
+`run_id` unique (a run is analyzed at most once, so at most one
+proposal). `has_proposal=False` rows have every other column `NULL`.
+`has_proposal=True` rows always have `direction`/`entry`/`stop`/`target`
+populated, then split on `is_coherent`: coherent has a real
+`risk_reward_ratio` and a `NULL` `coherence_error`; incoherent has the
+reverse. A `CHECK` constraint enforces this three-way shape at the
+database level — the same double-enforcement pattern (Python validation
+in `database/crud.py`, a `CHECK` constraint as the backstop) every other
+validated column in this file already uses, and the same "never guess,
+always record the real reason" rule `compute_risk_reward()` itself
+already follows for the run's own trade params. `direction`'s allowed
+set (`LONG`/`SHORT`) is duplicated from `agents.trade_agent.
+ALLOWED_PROPOSAL_DIRECTIONS`, not imported — `database/` stays a leaf
+module, same reasoning as `AGENT_CATEGORICAL_FIELDS` — kept from
+drifting apart by a dedicated test.
+
+A row is only ever written when the agent analysis itself **succeeded**.
+No row at all means the question was never reached (capture/market-data/
+agent all have to succeed first); `has_proposal=False` means the agent
+was asked and explicitly declined. Those are different facts, and only
+the second one gets a row — there's no third "not applicable" state to
+encode. This is also why `POST /runs/{run_id}/accept-proposal` treats "no
+proposal row" and "declined proposal" identically (both `409`): either
+way there's nothing to accept.
+
+**Coherence checking happens exactly once, in `backend/orchestrator.py`'s
+new `_persist_agent_proposal()`,** called right after a successful
+`AgentAnalysis` row is written. It calls `evals.trade_evaluator.
+compute_risk_reward()` on the *proposed* levels — the exact same function
+`guardrails/rules.py`'s `TRADE_PARAMS_VALID` rule already reuses for the
+run's own trade params, not a second implementation. This has zero
+bearing on the current run's own evaluation or guardrails:
+`evaluate()` and `evaluate_guardrails()` are never called with anything
+proposal-related, and neither function was touched by this iteration —
+confirmed directly by a test that runs the identical `EvaluationResult`
+through `evaluate()` with and without a proposal attached to the
+`AgentAnalysisResult`, including one deliberately engineered to a
+"perfect" `RR=10.0`, and asserts all three outcomes are byte-identical.
+A second test greps `evals/trade_evaluator.py`'s own source for any
+reference to the five `proposal_*` attribute names and confirms zero
+matches — the same style of direct-inspection proof Milestone 12's final
+review used for the prose fields.
+
+Coherence checking couldn't live in `agents/trade_agent.py` (would create
+a circular import with `evals/`) or in `database/crud.py` (would break
+the standing "`database/` stays a leaf module" rule) — `backend/
+orchestrator.py` is the one place that already depends on both.
+
+**`POST /runs/{run_id}/accept-proposal`** never rescores or re-analyzes
+the source run. It creates a **brand-new** `Run`, seeded with the
+proposal's `direction`/`entry`/`stop`/`target` as that new run's ordinary
+`Run.entry`/`stop`/`target` — indistinguishable from a run someone typed
+in by hand, except for a new `Run.accepted_from_run_id` column (a
+self-referential FK, `NULL` on every ordinary run) recording where the
+levels actually came from. The new run still needs its own
+`POST /runs/{new_run_id}/analyze` call like any other run — accepting is
+not itself an analysis. Both runs get an audit-trail entry
+(`accepted_from_proposal` on the new run, `proposal_accepted` on the
+source run), so the record of "a human made this choice" lives on both
+sides, not just one. `409` if the run has no proposal at all or the
+proposal was declined; `404` if the run doesn't exist. A deliberate
+non-restriction: an **incoherent** proposal can still be accepted — the
+new run just carries those same incoherent numbers and fails
+`TRADE_PARAMS_VALID` once analyzed, exactly as it would if a human had
+typed bad numbers in by hand. Accepting doesn't imply endorsing the math,
+so no special-casing was added to forbid it. Also deliberately
+unrestricted: nothing stops the same proposal from being accepted more
+than once (each acceptance is independent and side-effect-free — it only
+ever reads the source run's stored proposal, never mutates it), so
+repeated accepts simply spawn multiple new runs.
+
+**The prompt side (`prompts/analysis_prompt.md`, `prompts/
+system_prompt.md`)** frames a proposal explicitly as a hypothetical, not
+an instruction: "if someone were describing this setup with specific
+levels, here is what they might look like," reviewed by a human before
+it's ever acted on. The existing "never phrase anything as an instruction
+to buy/sell/enter/exit" rule is stated to apply to a proposed level
+exactly as much as to everything else the agent says — proposing 1.0950
+as an entry is a description, not a recommendation. Both prompts also now
+say plainly that the *only* numbers the agent's response is ever allowed
+to contain are the three proposed levels, and only when
+`proposal_has_proposal` is `true` — reinforcing the code-level rule, not
+substituting for it (see hardening requirement 1 above for why "the
+prompt says so" was never going to be enough on its own).
+
+**Agent (`agents/trade_agent.py`):** `AgentAnalysisResult` gained five
+fields — `proposal_has_proposal`, `proposal_direction`,
+`proposal_entry`, `proposal_stop`, `proposal_target` — all `None` on a
+`FAILED` analysis, matching every other qualitative field's pattern.
+`EXPECTED_FIELDS` grew from 10 to 15 JSON keys. Every existing
+construction site across the codebase (2 in `agents/trade_agent.py`, 3 in
+`backend/orchestrator.py`, plus test fixtures in `tests/test_evaluation.py`,
+`tests/test_guardrails.py`, `tests/test_orchestrator.py`, and
+`tests/test_failure_scenarios.py` — 12 in total) needed updating to pass
+the five new fields explicitly, the same "no silent defaulting" pattern
+the Milestone 8 revision's categorical fields already established for
+this same dataclass. `force_scenario`'s synthetic agent profiles
+(Milestone 12) always decline a proposal — this mechanism still never
+makes a real Claude call, and simulating a proposal was out of scope for
+what it exists to prove.
+
+**Tests, 47 added (271 total, up from 224):**
+
+- `tests/test_agent.py` — 22 added (53 total, up from 31): a well-formed
+  proposal maps into the four fields correctly; a decline maps to all
+  `None`; direction normalization and out-of-set rejection (mirroring the
+  existing categorical-field pattern); six tests proving hardening
+  requirement 1 (`probability`/`percentage`/`confidence`/`likelihood`/
+  `odds`-named extra fields rejected regardless of value type, including
+  one that's numeric *and* keyword-matched, proving the two checks aren't
+  mutually exclusive); four tests proving a numeric value is still
+  rejected everywhere except the three carved-out fields (numeric
+  `proposal_direction`, numeric `analysis_text`/`uncertainty` alongside a
+  well-formed proposal, a numeric-looking *string* in `proposal_entry`);
+  four tests proving `proposal_has_proposal` rejects `0`/`1`/`"true"`/
+  `"yes"`; four tests proving both directions of the fourth-case mismatch
+  are rejected (declined-with-populated-levels, accepted-with-a-null-
+  level × two fields), plus a missing-field test.
+- `tests/test_database.py` — 13 added (46 total, up from 33): coherent
+  and incoherent proposal round trips, a declined-proposal round trip, the
+  `Run.proposal` relationship, application-level rejection of an
+  out-of-set direction and of a coherent/incoherent proposal missing its
+  required ratio/error, three database-level `CHECK`-constraint rejection
+  tests (out-of-set direction, `has_proposal=true` with a null level,
+  `has_proposal=false` with a populated level, a coherent proposal
+  missing its ratio), the direction drift-guard test, and
+  `Run.accepted_from_run_id` round-tripping through a real commit+refresh.
+- `tests/test_evaluation.py` — 2 added (34 total, up from 32): the
+  evaluator-identical-with-or-without-a-proposal test (including the
+  engineered-`RR=10.0` case) and the source-grep test, both described
+  above.
+- `tests/test_orchestrator.py` — 10 added (20 total, up from 10): a
+  coherent proposal recorded and confirmed not to affect the run's own
+  `total_score` (still 76) or `TRADE_PARAMS_VALID`; an incoherent
+  proposal recorded with its real reason and no ratio, same
+  non-interference confirmed; a decline recorded; the audit event text
+  confirmed; `accept-proposal` success with full provenance (new run's
+  fields, `accepted_from_run_id`, both runs' audit events, source run's
+  evaluation confirmed unchanged); accepting an incoherent proposal
+  succeeds; `409` for a declined proposal, an unanalyzed run, and a run
+  with no proposal row at all (failed capture, agent never called);
+  `404` for a nonexistent run.
+
+**Manually verified against the real running server, not just
+`TestClient`** (see the transcript in this session for the exact
+commands): recreated `database/tradepilot.db` (confirmed the new
+`agent_proposals` table appears), started the real `uvicorn` process,
+confirmed `/runs/{run_id}/accept-proposal` appears in the real OpenAPI
+schema, created a real run, seeded a coherent proposal directly via
+`database.crud` (standing in for what a real orchestrator run produces —
+the same seeding technique Milestone 10's manual verification used before
+an orchestrator existed), confirmed `GET /runs/{id}` showed it, called
+`accept-proposal` for real and got back a new run with
+`accepted_from_run_id` pointing at the source run and the proposed levels
+as its own `entry`/`stop`/`target`, confirmed both runs' real audit
+trails (`accepted_from_proposal` on the new run, `proposal_accepted` on
+the source run), and confirmed a second `accept-proposal` call on the new
+run (which has no proposal of its own) was refused with a real `409`.
+Dev database reset to empty afterward.
+
+**Deferred, not forgotten:** the frontend has no UI for proposals yet —
+no display of a proposed level alongside the user's own, no "Accept
+proposal" button. This mirrors exactly how 6C built every pipeline tool
+(`capture/`, `tools/market_data.py`, `agents/trade_agent.py`, `evals/`,
+`guardrails/`) standalone and backend-only before Milestone 11 wired any
+of them into the UI. `frontend/src/api/types.ts` is additive-safe either
+way — the backend now returns `proposal`/`accepted_from_run_id` fields
+the frontend's TypeScript interfaces don't yet know about, which is
+silently ignored by `fetch`/`JSON.parse`, not a breaking change; all 32
+existing frontend tests pass unmodified. Wiring the UI is explicitly not
+part of this iteration's scope and hasn't been scheduled.
+
 ## Roadmap
 
 1. ~~Architecture~~
