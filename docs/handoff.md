@@ -9,79 +9,115 @@ duplicates: [docs/architecture.md](architecture.md),
 
 ## 1. Current state
 
-- **All twelve planned milestones are complete.** This is the "6C
-  baseline" — see the annotated git tag `6c-baseline` for exactly this
-  state, and the command to return to it, in
-  [docs/iterations.md](iterations.md)'s Milestone 12 entry. There is no
-  Milestone 13 planned; anything from here is new work, not finishing
-  the original plan.
-- **Latest commit:** "Milestone 12 - documented failure modes and final
-  verification".
-- **Test count:** 218 backend tests + 32 frontend tests, all passing.
-  Backend: 24 database + 32 API + 17 capture + 19 market data + 25 agent
-  + 32 evaluation + 36 guardrails + 10 orchestrator + 14 failure
-  scenarios. Frontend: 32 tests across 9 files (Vitest + React Testing
-  Library), none making a real network call. See the roadmap checklist
-  at the bottom of [docs/iterations.md](iterations.md) for the full
-  milestone list.
-- **Read [docs/failure_modes.md](failure_modes.md) before touching
-  anything safety-related.** Eleven scenarios, each a real reproducible
-  run, proving every guardrail actually stops a bad run — not just
-  asserted in a unit test. It also documents `force_scenario`
-  (`POST /runs/{run_id}/analyze?force_scenario=...`), a testing-only
-  mechanism gated behind `TESTING_CONTROLS_ENABLED` (off by default in
-  `.env`) that deliberately forces one pipeline stage to a synthetic
-  result so a guardrail can be demonstrated on demand. If you're asked
-  to add a new failure scenario or guardrail, this is the pattern to
-  extend, not a new one-off.
-- **The frontend is wired to the real backend.** Submit a symbol in the
-  UI → it creates a run, runs the real pipeline, and shows the real
-  result: chart image, market quote, agent prose and categories, every
-  score next to the evidence that produced it, all eleven guardrail
-  results, and working approve/reject. Nothing in the UI computes a
-  number itself. See the "Milestone 11" entry in
-  [docs/iterations.md](iterations.md) for the full breakdown, including
-  the one backend prerequisite it needed (`GET /runs/{run_id}/screenshot`
-  — the only way a browser can display a chart image that lives on the
-  backend's own filesystem).
-- **The orchestrator exists.** `backend/orchestrator.py`'s
-  `run_pipeline()`, called via `POST /runs/{run_id}/analyze`, actually
-  runs capture → market data → agent → evaluation → guardrails in order
-  for one run and persists every step, synchronously, in a single
-  request. `capture/`, `tools/market_data.py`, `agents/trade_agent.py`,
-  `evals/trade_evaluator.py`, and `guardrails/rules.py` themselves are
-  unchanged — still standalone, independently callable modules; the
-  orchestrator only calls them in sequence.
-- **The schema is complete.** `agent_analyses` and `evaluations` both
-  carry `status`/`error_message` (a `FAILED` row is a real row, never
-  zeros, never a fabricated string); `agent_analyses` stores the five
-  categorical fields the rubric scores from; `market_data.mode` and
-  `evaluations.risk_reward_ratio` closed the last two gaps found by the
-  Milestone 10.5 fix 2 audit. Every field every pipeline dataclass
-  produces now has a corresponding column — see the three "Milestone
-  10.5 fix" entries in [docs/iterations.md](iterations.md).
-- **A final, code-verified review (not just asserted) closed Milestone
-  12** — no trade-execution code path exists anywhere (grepped, zero
-  matches), no code path reaches `APPROVED` without a real human
-  `POST /runs/{id}/review` request, the evaluator never reads the
-  agent's prose (only its seven categorical/status fields), and no
-  silent fallback or fabricated value was found anywhere in the
-  pipeline. Two honestly-named weak points: **no authentication or rate
-  limiting on the API** (fine on `localhost`, a real problem the moment
-  this is reachable from anywhere else — spammable, and each analyze
-  call can cost real money), and **LIVE mode is comparatively unproven**
-  (real TradingView scraping and real Alpha Vantage calls are
-  unit-tested with mocks but were never run against the real internet
-  in this project). See the Milestone 12 entry in
-  [docs/iterations.md](iterations.md) for the full verification.
-- See "How to run everything" below for the exact commands to start both
-  servers and exercise the app.
+- **6C is complete and tagged `6c-baseline`.** All twelve originally
+  planned milestones — see the annotated tag, and the command to return
+  to exactly that state, in [docs/iterations.md](iterations.md)'s
+  Milestone 12 entry and its Roadmap checklist at the bottom.
+- **One post-baseline defect fix landed after the tag:** a live-run
+  agent-response truncation bug (`max_tokens` raised 1024→2048 and made
+  configurable, the prompt tightened to stop inviting unbounded prose).
+  See the `## fix: agent response truncation on live runs` entry in
+  [docs/iterations.md](iterations.md) for the full diagnosis and fix —
+  it deliberately added no retry-on-truncation logic and no partial-JSON
+  recovery; a malformed response is still a `FAILED` analysis.
+- **Latest commit:** `585f625` "chore: dry run sweep script for demo
+  prep" (an operational script, `dry-run.ps1`, not a milestone or an
+  iteration — no doc entry needed for it).
+- **7A has not started yet.** Iteration 1 (agent-proposed trade levels)
+  is in design: a schema (a new `agent_proposals` table, not new columns
+  on `agent_analyses`) and an endpoint shape
+  (`POST /runs/{run_id}/accept-proposal`) were proposed and are awaiting
+  confirmation before any code, schema migration, or test is written. See
+  "The 7A plan" and "The 7A-specific invariant" below before starting —
+  read them in full before writing a single line, since the whole
+  iteration hinges on where the numeric carve-out and the coherence check
+  are allowed to live. Iterations 2–4 haven't been designed at all yet.
+- **Test counts as of the truncation fix (last real run):** 224 backend
+  tests + 32 frontend tests, all passing. Backend: 33 database + 32 API +
+  17 capture + 19 market data + 31 agent + 32 evaluation + 36 guardrails
+  + 10 orchestrator + 14 failure scenarios. These will grow once 7A
+  Iteration 1 actually lands — treat this count as stale the moment any
+  7A code exists.
 
-## 2. The non-negotiable invariants
+## 2. The 7A plan
 
-These hold regardless of which milestone is being worked on. Each one
-has a specific enforcement point in the code — if a change would
-weaken any of these, stop and ask rather than proceeding.
+Four iterations, in order, agreed before any 7A code was written. **Do
+not start iteration N+1 without an explicit go-ahead**, exactly the same
+"one milestone at a time" rule 6C ran under (see "Working agreement"
+below) — it applies to 7A iterations the same way it applied to 6C
+milestones.
+
+1. **Iteration 1 — agent-proposed trade levels, never self-scored.** The
+   agent proposes an entry/stop/target/direction: an *alternative* when
+   the user supplied their own levels, or its own idea when the user
+   supplied none. The proposal is stored separately from anything
+   `evals/trade_evaluator.py` reads, shown for comparison, and only
+   becomes real scored input when a human explicitly accepts it — which
+   creates a brand-new run. See "The 7A-specific invariant" below; this
+   is the entire reason the iteration is designed the way it is.
+   **In progress — design proposed, not yet confirmed or built.**
+2. **Iteration 2 — multi-timeframe capture + cross-timeframe agreement
+   guardrail.** Not yet designed.
+3. **Iteration 3 — economic calendar tool + event-proximity block.**
+   Wires up `tools/economic_calendar.py` — scaffolded since the early
+   milestones, mentioned in [docs/architecture.md](architecture.md) as
+   "contextual input for later," never actually called by anything — into
+   a new guardrail that blocks or forces review near a scheduled event.
+   Not yet designed.
+4. **Iteration 4 (if time) — eval harness measuring agent reproducibility
+   across repeated runs on a golden set.** Not yet designed.
+
+## 3. The 7A-specific invariant
+
+**Agent-proposed entry/stop/target are never automatically scored.**
+
+`risk_reward_score` is the one rubric component computed purely from
+arithmetic on real numbers (see [docs/rubric.md](rubric.md)) — every
+other component is capped by the agent's own stated uncertainty, but
+Risk/Reward is exempt, because it's a fact about numbers the user typed
+in, not a reading of an ambiguous chart. That exemption only holds because
+the agent has zero influence over which numbers go into that arithmetic
+today.
+
+The moment the agent is allowed to propose entry/stop/target *and* have
+those numbers scored automatically, that stops being true: the agent
+could simply propose levels arithmetically engineered to `RR = 2.0` (or
+higher) and guarantee itself the full 20 points on the one component
+uncertainty can't touch — turning the one genuinely agent-proof number in
+the whole rubric into the easiest one to game.
+
+So: a proposal is data, not input to scoring, until a human says
+otherwise. Concretely —
+
+- Proposed levels are stored in their own place (`agent_proposals`, not
+  `agent_analyses`, not `evaluations`), never read by
+  `evals/trade_evaluator.py` at all. A test proves this directly — the
+  evaluator's behavior on a run with a stored proposal must be identical
+  to its behavior on a run with none.
+- Proposed levels are displayed to a human for comparison, alongside the
+  user's own levels when both exist — never merged into the same score.
+- The *only* way a proposal becomes something that gets scored is a
+  human explicitly accepting it, and accepting it doesn't score the
+  original run — it creates a **new** run, with the accepted levels
+  stored as ordinary user-supplied `Run.entry/stop/target`, indistinguishable
+  from a run someone typed in by hand. The audit trail on both runs
+  records that a human made that choice.
+- Coherence checking (stop on the correct side, non-zero risk distance)
+  happens exactly once, in `backend/orchestrator.py`, reusing
+  `evals/trade_evaluator.py`'s `compute_risk_reward()` — the same
+  function `guardrails/rules.py` already reuses for the user's own
+  params, not a second implementation. It cannot live in
+  `agents/trade_agent.py` (would create a circular import with `evals/`)
+  or in `database/crud.py` (would break the standing "database/ stays a
+  leaf module" rule — see the comment on `AGENT_CATEGORICAL_FIELDS` in
+  `database/models.py`).
+
+## 4. The non-negotiable invariants
+
+These hold regardless of which milestone or iteration is being worked
+on — 6C's and 7A's alike. Each one has a specific enforcement point in
+the code — if a change would weaken any of these, stop and ask rather
+than proceeding.
 
 - **(a) Never places, submits, or simulates a trade.** There is no
   broker/order-execution integration anywhere, and none is planned.
@@ -92,7 +128,11 @@ weaken any of these, stop and ask rather than proceeding.
   `agents/trade_agent.py`'s `_parse_response()` rejects the entire
   response if any field is a number where a word is expected, or an
   unrecognized category value. All scoring is
-  `evals/trade_evaluator.py`, deterministic Python.
+  `evals/trade_evaluator.py`, deterministic Python. (7A Iteration 1 adds
+  a narrow, explicit carve-out for exactly three field names —
+  `proposal_entry`/`proposal_stop`/`proposal_target` — so the agent can
+  state a proposed price level; see "The 7A-specific invariant" above
+  for why that carve-out can never become a scoring path.)
 - **(c) `total_score` is always the sum of its five components.**
   Enforced twice: `evals/trade_evaluator.py`'s `evaluate()` has no
   `total_score` parameter, and the database itself has a `CHECK`
@@ -121,10 +161,10 @@ weaken any of these, stop and ask rather than proceeding.
   `TypeDecorator` applied to every datetime column, because SQLite
   otherwise silently drops timezone info on write.
 
-## 3. Working agreement
+## 5. Working agreement
 
-- **One milestone at a time.** Do not start the next milestone
-  without an explicit go-ahead, even if the current one's tests pass
+- **One milestone (or 7A iteration) at a time.** Do not start the next
+  one without an explicit go-ahead, even if the current one's tests pass
   and the commit is made.
 - **Run the entire test suite, not just new tests**, after every
   change — `pytest` from the repo root.
@@ -132,16 +172,24 @@ weaken any of these, stop and ask rather than proceeding.
   developer — narrate what's being built and why before/while writing
   code, not just what the code does.
 - **Update `docs/iterations.md`** with a new dated section at the end
-  of every milestone (and `README.md` when setup/usage instructions
-  change), before committing.
-- **Commit at the end of each milestone**, one phase per commit,
-  prefixed with the milestone, e.g. `"Milestone 10 - human approval
-  and decision audit"`.
-- When a "before Milestone N, fix a defect" request comes in, treat it
-  as its own small task: fix, test, document, commit — then wait for
-  the go-ahead on Milestone N itself.
+  of every milestone/iteration (and `README.md` when setup/usage
+  instructions change), before committing. For 7A specifically, each
+  entry must record not just what changed but **why** — the design
+  tension and how it was resolved — since this is graded capstone
+  evidence, not just a changelog.
+- **Commit at the end of each milestone/iteration**, one phase per
+  commit, prefixed accordingly, e.g. `"Milestone 10 - human approval and
+  decision audit"` or `"7A Iteration 1 - agent-proposed trade levels,
+  never self-scored"`.
+- **Tag at the end of each 7A iteration**, the same pattern
+  `6c-baseline` used for the whole of 6C: an annotated git tag per
+  iteration (`7a-iteration-1`, `7a-iteration-2`, ...), created after the
+  commit and after `docs/iterations.md` is updated, not before.
+- When a "before the next milestone/iteration, fix a defect" request
+  comes in, treat it as its own small task: fix, test, document, commit
+  — then wait for the go-ahead on the next milestone/iteration itself.
 
-## 4. Gotchas already hit
+## 6. Gotchas already hit
 
 Brief pointers only — full detail is in the matching
 [docs/iterations.md](iterations.md) entry.
@@ -167,8 +215,17 @@ Brief pointers only — full detail is in the matching
   correct "timestamp is in the future" rejection fire, but only when
   the full suite ran together. Fixed by computing `now` after the
   provider call, matching how a real caller does it.
+- **A live-run agent response was truncated mid-JSON.** The real cause
+  was `max_tokens=1024` combined with a prompt that never told the model
+  its prose could be short — not a parsing bug. Diagnosed via
+  `response.stop_reason == "max_tokens"`, checked before parsing is even
+  attempted. Fixed by raising `max_tokens` and tightening the prompt;
+  deliberately did **not** add retry-on-truncation or partial-JSON
+  recovery — a malformed response stays a `FAILED` analysis (see the
+  `## fix: agent response truncation on live runs` entry in
+  [docs/iterations.md](iterations.md)).
 
-## 5. How to run everything
+## 7. How to run everything
 
 Windows PowerShell, from the repo root. **Two servers, two terminals:**
 
@@ -208,30 +265,32 @@ click-by-click steps to run one DEMO analysis end to end in the UI:
 - [Running one DEMO analysis end to end in the UI](../README.md#running-a-demo-analysis-in-the-ui)
 - [Reproducing any of the eleven documented failure scenarios](../docs/failure_modes.md)
 
-## 6. What's not built, and what's genuinely still weak
+## 8. What's not built, and what's genuinely still weak
 
-The 6C plan is complete — this section is no longer "what's next," it's
-"what was deliberately left out, and where this project is honestly
-weakest." Both are worth reading before assuming a gap needs fixing;
-some of these are documented tradeoffs, not oversights.
+The 6C plan is complete — this section is no longer "what's next for
+6C," it's "what was deliberately left out of 6C, and where the project
+is honestly weakest going into 7A." Both are worth reading before
+assuming a gap needs fixing; some of these are documented tradeoffs, not
+oversights. (7A's own open items are tracked in "The 7A plan" above, not
+here.)
 
 - **No authentication or rate limiting on the API.** Named plainly as
-  the weakest part of this project in the Milestone 12 final review.
+  the weakest part of the project in the Milestone 12 final review.
   Fine for a single developer on `localhost` (how this has been built
   and run throughout); a real risk — spammable, and `POST
   /runs/{id}/analyze` can cost real money per call — the moment this is
   ever reachable from anywhere else. If a future request is "expose
   this beyond localhost" or "add multi-user support," this is the first
   thing that needs solving, not an afterthought.
-- **LIVE mode is comparatively unproven.** Named as the second weakest
-  part. Real TradingView scraping (`capture/live_provider.py`) and real
-  Alpha Vantage calls (`tools/market_data.py`) are unit-tested with
-  mocks but have never been run against the real internet in this
-  project — every guardrail proof, every manual verification, and all
-  of Milestone 12's failure-scenario evidence is DEMO-mode. Not
-  architecturally unsafe (a real failure there would still show up as
-  an honest `FAILED` result, per every invariant this project enforces)
-  — just genuinely untested against reality.
+- **LIVE mode is comparatively unproven at scale.** Named as the second
+  weakest part at the Milestone 12 review. A real LIVE run has since been
+  exercised end to end (see the truncation-fix entry above), but that was
+  one manual run, not a sustained or automated one — real TradingView
+  scraping (`capture/live_provider.py`) and real Alpha Vantage calls
+  (`tools/market_data.py`) are still primarily unit-tested with mocks.
+  Not architecturally unsafe (a real failure there still shows up as an
+  honest `FAILED` result, per every invariant this project enforces) —
+  just genuinely light on real-world mileage.
 - **Known, deliberate scope limits from Milestone 11** (not gaps,
   documented tradeoffs — see that entry in
   [docs/iterations.md](iterations.md) for the reasoning): the run list
@@ -244,10 +303,11 @@ some of these are documented tradeoffs, not oversights.
   backend change if the list ever needs to show many more rows; a
   LIVE-mode UI walkthrough wasn't exercised (needs a real browser
   capture and an Alpha Vantage key).
-- **No known schema gaps remain.** The eight-table audit from Milestone
-  10.5 fix 2 found two gaps; fix 3 closed both. Every field every
-  pipeline dataclass produces now has a corresponding column.
+- **No known schema gaps remain from 6C.** The eight-table audit from
+  Milestone 10.5 fix 2 found two gaps; fix 3 closed both. Every field
+  every 6C pipeline dataclass produces has a corresponding column. (7A
+  Iteration 1 will add a new table, `agent_proposals` — that's new
+  surface area, not a gap in the old one.)
 - **`tools/economic_calendar.py` exists but was never wired into the
-  workflow** (mentioned in `docs/architecture.md` as "contextual input
-  for later"). Untouched since it was scaffolded — not part of the 12
-  milestones, not started.
+  workflow.** Untouched since it was scaffolded in an early milestone —
+  this is now explicitly **7A Iteration 3**, not an open-ended gap.
