@@ -20,12 +20,10 @@ duplicates: [docs/architecture.md](architecture.md),
   [docs/iterations.md](iterations.md) for the full diagnosis and fix —
   it deliberately added no retry-on-truncation logic and no partial-JSON
   recovery; a malformed response is still a `FAILED` analysis.
-- **Latest committed and pushed state:** `a7c085c` "docs: record the
-  proposed-RR variation finding and confirm chart_variant is inert in
-  LIVE mode" — a docs-only follow-up to the Iteration 1 commit. Both
-  `b869f07` (the Iteration 1 UI/live-verification/fixture commit, tagged
-  `7a-iteration-1`) and `a7c085c` are pushed; `origin/7a-iterations`
-  points at `a7c085c`.
+- **Latest state:** `c4381a1` "7A Iteration 2 - multi-timeframe capture
+  and cross-timeframe agreement guardrail", tagged `7a-iteration-2`.
+  `b869f07` (Iteration 1, tagged `7a-iteration-1`) and `a7c085c` (its
+  docs-only follow-up) precede it on `7a-iterations`.
 - **7A Iteration 1 is complete, tagged `7a-iteration-1` at `b869f07`
   (pushed), including the UI and live verification.** Agent-proposed
   trade levels (`agent_proposals` table, coherence checking in
