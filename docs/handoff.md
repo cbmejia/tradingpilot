@@ -97,7 +97,16 @@ milestones.
    a new guardrail that blocks or forces review near a scheduled event.
    Not yet designed.
 4. **Iteration 4 (if time) — eval harness measuring agent reproducibility
-   across repeated runs on a golden set.** Not yet designed.
+   across repeated runs on a golden set.** Not yet designed. Has a
+   concrete motivating question now, from real live-run evidence: does
+   proposed RR cluster on the user-supplied value when one is present,
+   across many repeated runs on the same chart? See "An empirical
+   observation: proposed RR varies with what the agent was shown" in
+   [docs/iterations.md](iterations.md)'s Iteration 1 addendum —
+   `ed4e50b2...`'s proposal matched the user's own `RR=2.0` on different
+   numbers, `cd25a285...`'s (no user levels) came out to `RR≈1.83`.
+   `n=2` settles nothing; this is the question a golden-set harness
+   would actually answer.
 
 ## 3. The 7A-specific invariant
 

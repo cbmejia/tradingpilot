@@ -2343,6 +2343,77 @@ authoritative enforcement evidence; live calls only ever tested whether a
 well-behaved model produces a well-shaped response, which it did, four
 times out of four.
 
+### An empirical observation: proposed RR varies with what the agent was shown
+
+Only one run is both no-user-levels *and* has a populated proposal —
+`cd25a285ea574501bf41a9a4cec26c32` — so it's the only non-trivial
+execution of the leak path; the DEMO-fixture RUN A confirmed `NULL`
+trivially, since the agent declined and there was nothing to leak. Its
+stored records, read directly from `database/tradepilot.db` (not
+summarized):
+
+```
+agent_proposals: has_proposal=True direction=LONG entry=1.154 stop=1.148
+                  target=1.165 risk_reward_ratio=1.833333333333352
+                  is_coherent=True
+evaluations:      status=FAILED risk_reward_ratio=None
+                  risk_reward_score=None total_score=None
+```
+
+Both required fields are genuinely `NULL`/unscored, confirmed from the
+stored row itself, not inferred.
+
+Comparing the two runs that both produced a proposal is worth recording
+on its own, separately from the leak test:
+
+- **`ed4e50b2e5b34d389f9734145dc7f53f`** — the user supplied `LONG
+  entry=1.156 stop=1.146 target=1.176`: risk `= 1.156 − 1.146 = 0.010`,
+  reward `= 1.176 − 1.156 = 0.020`, `RR = 0.020 / 0.010 = 2.0`. The
+  agent's own proposal, from the same call, used **different** levels —
+  `LONG entry=1.156 stop=1.149 target=1.170`: risk `= 1.156 − 1.149 =
+  0.007`, reward `= 1.170 − 1.156 = 0.014`, `RR = 0.014 / 0.007 = 2.0`
+  (stored as `2.0000000000000315`, floating-point noise from the same
+  division every other RR in this codebase already shows). A tighter
+  stop and a closer target than the user's own — but the identical ratio.
+- **`cd25a285ea574501bf41a9a4cec26c32`** — no user levels at all. The
+  agent's own proposal: `LONG entry=1.154 stop=1.148 target=1.165`: risk
+  `= 1.154 − 1.148 = 0.006`, reward `= 1.165 − 1.154 = 0.011`, `RR =
+  0.011 / 0.006 = 1.8333...` (stored as `1.833333333333352`) — below 2.0.
+
+Two readings fit this pair equally well, and `n=2` settles neither:
+
+1. **Anchoring on the supplied levels.** Seeing a user-supplied `RR=2.0`
+   trade may have pulled the agent's own alternative toward the same
+   ratio, even on different specific numbers, even though the prompt
+   never mentions the user's levels as something to match.
+2. **Independently seeking the top of the risk/reward band.** `RR≥2.0`
+   is a natural, round, commonly-taught "good trade" heuristic in
+   discretionary trading generally — the agent may gravitate there on its
+   own, with or without a user example, simply because 1.83 was a
+   genuinely-tighter-target read of a chart with less room to the next
+   resistance level. Nothing in the prompt tells the model this app's own
+   `RR_STRONG_THRESHOLD = 2.0` scoring boundary at all, since scoring
+   thresholds live only in `evals/trade_evaluator.py`.
+
+**What actually holds, from two data points, is narrower than either
+theory: proposed RR varies with what the agent was shown.** That's not a
+throwaway aside — it's the empirical version of the exact design tension
+this iteration was built around (see "The tension this iteration exists
+to resolve" above). An agent whose proposed numbers can vary at all based
+on context is precisely why `evals/trade_evaluator.py` must never read
+`agent_proposals`, and why a proposal only becomes scoring input through
+an explicit human accept. If proposed RR *did* reliably cluster on
+whatever the user supplied — or reliably cluster at the scoring
+threshold — that would be worth knowing before ever relaxing the
+never-auto-scored rule, not after.
+
+**This is the motivating question for 7A Iteration 4** (the eval harness
+measuring agent reproducibility across repeated runs on a golden set,
+see [docs/handoff.md](handoff.md)'s "The 7A plan"): *does proposed RR
+cluster on the user-supplied value when one is present, on the same
+chart repeated across many runs?* Two single data points can suggest the
+question; only a golden-set harness with repeated trials can answer it.
+
 ### The fix: a second, real, paired DEMO fixture — `chart_variant`
 
 Closing the actual gap (DEMO mode could never demonstrate a populated
@@ -2365,9 +2436,27 @@ proposal) without touching the prompt:
   already uses for its own duplicated small constants.
 - **`capture/manager.py` / `tools/market_data.py`'s managers** — both
   thread `chart_variant` through to their DEMO provider only, via
-  `isinstance()` checks; a LIVE provider never receives it (it has no
-  such concept — confirmed by a test that would raise `TypeError` if the
-  manager tried).
+  `isinstance()` checks; a LIVE provider never receives it. This matters
+  specifically because leaving `chart_variant` ungated (unlike
+  `force_scenario`) is only safe if it can *never* cause a DEMO fixture
+  to be served while `CAPTURE_MODE=live` — a silent LIVE→DEMO fallback,
+  the one thing this codebase treats as non-negotiable everywhere else.
+  It can't: `LiveProvider.capture(self, symbol, timeframe)` and
+  `LiveMarketDataProvider.get_quote(self, symbol)` have no `chart_variant`
+  parameter at all (confirmed by inspecting both signatures directly, not
+  just reasoned about) — passing it would raise `TypeError` immediately,
+  a loud crash, never a silent substitution. The `isinstance()` guard
+  above stops that from ever being attempted in the first place, and
+  `test_capture_manager_ignores_chart_variant_in_live_mode`
+  (`tests/test_capture.py`) /
+  `test_manager_ignores_chart_variant_in_live_mode`
+  (`tests/test_market_data.py`) prove it directly: each passes
+  `chart_variant="readable_chart"` to a manager running in LIVE mode with
+  a fake LIVE provider whose `capture()`/`get_quote()` only accepts
+  `(symbol, timeframe)`/`(symbol,)` — if the manager ever forwarded
+  `chart_variant` to it, the test would fail with an uncaught `TypeError`
+  rather than the clean `FAILED` result it actually asserts. Both tests
+  pass.
 - **`backend/orchestrator.py`** — `run_pipeline()` gained a `chart_variant`
   keyword, re-validated against a new `DEMO_CHART_VARIANTS` frozenset
   (same defense-in-depth pattern as `force_scenario`), threaded to both
