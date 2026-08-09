@@ -1,6 +1,7 @@
 {
   "EURUSD": {
-    "price": 1.0921
+    "price": 1.0921,
+    "readable_price": 1.1558
   },
   "GBPUSD": {
     "price": 1.2734

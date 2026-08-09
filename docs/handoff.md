@@ -23,32 +23,46 @@ duplicates: [docs/architecture.md](architecture.md),
 - **Latest commit:** `585f625` "chore: dry run sweep script for demo
   prep" (an operational script, `dry-run.ps1`, not a milestone or an
   iteration — no doc entry needed for it).
-- **7A Iteration 1 is complete.** Agent-proposed trade levels
-  (`agent_proposals` table, coherence checking in `backend/orchestrator.py`
-  reusing `evals/trade_evaluator.py`'s `compute_risk_reward()`,
-  `POST /runs/{run_id}/accept-proposal`) are built, tested, and manually
-  verified against a real running server. See the `## 7A Iteration 1 —
-  agent-proposed trade levels, never self-scored` entry in
-  [docs/iterations.md](iterations.md) for the full design, including two
-  hardening requirements added before the build started (code-level
+- **7A Iteration 1 is complete, including the UI and live verification.**
+  Agent-proposed trade levels (`agent_proposals` table, coherence checking
+  in `backend/orchestrator.py` reusing `evals/trade_evaluator.py`'s
+  `compute_risk_reward()`, `POST /runs/{run_id}/accept-proposal`) are
+  built, tested, and verified against a **real Claude call** — not just a
+  hand-seeded DEMO row. See `## 7A Iteration 1 — agent-proposed trade
+  levels, never self-scored` and its `## 7A Iteration 1 addendum` in
+  [docs/iterations.md](iterations.md) for the full history, including:
+  two hardening requirements added before the build started (code-level
   rejection of any probability/confidence/percentage/likelihood/odds-named
   field regardless of type, and explicit rejection of both directions of
-  a `proposal_has_proposal`/levels mismatch) — read that entry before
-  touching `agents/trade_agent.py`'s `_parse_response()` again, since both
-  requirements are about the enforcement being in code, not just the
-  prompt. **The frontend has no UI for proposals yet** — deliberately
-  deferred, same pattern 6C used for every pipeline tool before Milestone
-  11 wired the UI up; not scheduled.
+  a `proposal_has_proposal`/levels mismatch — read before touching
+  `agents/trade_agent.py`'s `_parse_response()` again); a real finding
+  that the original abstract DEMO fixture (`EURUSD_1h.png`) can never
+  demonstrate a populated proposal (confirmed live, twice) and the fix —
+  `chart_variant`, a second real DEMO fixture (`EURUSD_4h_readable.png`,
+  an actual captured chart) with a properly paired quote, not a prompt
+  change; and the frontend proposal panel, side-by-side display, and
+  accept-and-navigate flow, all built and tested — **nothing about the UI
+  is deferred anymore.**
 - **7A Iteration 2 (multi-timeframe capture + cross-timeframe agreement
   guardrail) has not started.** Awaiting a go-ahead per the "one iteration
   at a time" working agreement below. Iterations 3–4 haven't been
   designed at all yet.
-- **Test counts as of 7A Iteration 1 (last real run):** 271 backend tests
-  + 32 frontend tests, all passing. Backend: 46 database + 32 API + 17
-  capture + 19 market data + 53 agent + 34 evaluation + 36 guardrails +
-  20 orchestrator + 14 failure scenarios. These will grow once 7A
+- **Test counts as of 7A Iteration 1 (last real run):** 292 backend tests
+  + 44 frontend tests, all passing. Backend: 46 database + 32 API + 25
+  capture + 26 market data + 53 agent + 34 evaluation + 36 guardrails +
+  26 orchestrator + 14 failure scenarios. These will grow once 7A
   Iteration 2 lands — treat this count as stale the moment more 7A code
   exists.
+- **Alpha Vantage's free-tier daily quota (25 requests) is exhausted as
+  of this session** — hit partway through a 5-request LIVE sweep
+  (`dry-run.ps1`). No visibility into the exact remaining count or reset
+  time beyond the API's own error text; check the Alpha Vantage account
+  dashboard before spending more LIVE market-data calls. `.env` has been
+  restored to `CAPTURE_MODE=demo`/`MARKET_DATA_MODE=demo`. The new
+  `demo_chart_variant=readable_chart` DEMO path (see above) covers
+  everything the proposal feature needs to demonstrate without spending
+  any more LIVE calls — save remaining quota for an actual LIVE segment
+  if one gets recorded, not for further verification.
 
 ## 2. The 7A plan
 
@@ -64,12 +78,16 @@ milestones.
    supplied none. The proposal is stored separately from anything
    `evals/trade_evaluator.py` reads, only becomes real scored input when a
    human explicitly accepts it via `POST /runs/{run_id}/accept-proposal`
-   — which creates a brand-new run — and is *not yet* shown for
-   comparison in the UI (deliberately deferred; see below). See "The
-   7A-specific invariant" below; this is the entire reason the iteration
-   is designed the way it is. **Complete — backend built, tested (271
-   backend tests, up from 224), and manually verified against a real
-   running server. Tagged `7a-iteration-1`.**
+   — which creates a brand-new run — and is shown for comparison in the
+   UI (`AgentProposalPanel`, side by side with the user's own levels when
+   both exist). See "The 7A-specific invariant" below; this is the entire
+   reason the iteration is designed the way it is. **Complete — backend
+   and UI both built, tested (292 backend tests up from 224, 44 frontend
+   tests up from 32), and verified against a real Claude call** (twice
+   against a real chart with visible structure — both times it proposed —
+   and twice against the original abstract DEMO fixture — both times it
+   correctly declined; see docs/iterations.md's addendum for the full
+   live-run evidence). Tagged `7a-iteration-1`.
 2. **Iteration 2 — multi-timeframe capture + cross-timeframe agreement
    guardrail.** Not yet designed.
 3. **Iteration 3 — economic calendar tool + event-proximity block.**
@@ -111,10 +129,13 @@ otherwise. Concretely —
 - Proposed levels are available via `GET /runs/{run_id}` (the `proposal`
   field, alongside the user's own levels on the same response) for a
   human to compare — never merged into the same score. **The frontend
-  doesn't render this yet** — `GET /runs/{run_id}` returning it is done;
-  a UI panel showing it side-by-side with the user's own levels is
-  deliberately deferred, the same "build the tool standalone before
-  wiring the UI" pattern 6C used throughout. Not scheduled.
+  renders this** (`frontend/src/components/AgentProposalPanel.tsx`,
+  wired into `RunDetailView.tsx`): a dashed, visually distinct panel
+  labelled "unscored," side by side with the user's own levels when both
+  exist, the proposal's own risk/reward ratio labelled "informational
+  only — not part of the score," and a plain decline notice (with the
+  agent's own stated reasoning, when available) rather than an empty
+  panel when the agent declines.
 - The *only* way a proposal becomes something that gets scored is a
   human explicitly accepting it, and accepting it doesn't score the
   original run — it creates a **new** run, with the accepted levels

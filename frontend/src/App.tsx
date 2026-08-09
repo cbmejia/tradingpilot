@@ -33,6 +33,9 @@ function App() {
   const [reviewBusy, setReviewBusy] = useState(false);
   const [reviewError, setReviewError] = useState<string | null>(null);
 
+  const [acceptingProposal, setAcceptingProposal] = useState(false);
+  const [acceptProposalError, setAcceptProposalError] = useState<string | null>(null);
+
   const pollHandle = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadRunList = useCallback(async () => {
@@ -76,6 +79,7 @@ function App() {
     setSelectedRunId(runId);
     setDetailError(null);
     setReviewError(null);
+    setAcceptProposalError(null);
     try {
       const run = await api.getRun(runId);
       setSelectedRun(run);
@@ -157,6 +161,26 @@ function App() {
     }
   }
 
+  // 7A Iteration 1. Accepting never rescores or re-analyzes the current
+  // run -- it creates a brand-new one (api.acceptProposal's response),
+  // then "navigates" to it the same way clicking a row in the run list
+  // already does: selectRun() fetches and displays it. The new run still
+  // needs its own Analyze step; this only seeds its trade params.
+  async function handleAcceptProposal() {
+    if (!selectedRunId) return;
+    setAcceptingProposal(true);
+    setAcceptProposalError(null);
+    try {
+      const created = await api.acceptProposal(selectedRunId);
+      await selectRun(created.id);
+      loadRunList();
+    } catch (err) {
+      setAcceptProposalError(errorMessage(err));
+    } finally {
+      setAcceptingProposal(false);
+    }
+  }
+
   return (
     <div className="flex min-h-full flex-col bg-slate-950 text-slate-100">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b border-slate-800 px-6 py-4">
@@ -203,6 +227,10 @@ function App() {
               onApprove={(comment) => handleReview("APPROVED", comment)}
               onReject={(comment) => handleReview("REJECTED", comment)}
               reviewBusy={reviewBusy}
+              onAcceptProposal={handleAcceptProposal}
+              acceptingProposal={acceptingProposal}
+              acceptProposalError={acceptProposalError}
+              onSelectRun={selectRun}
             />
           ) : (
             <Card title="No run selected">

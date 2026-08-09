@@ -2233,17 +2233,271 @@ the source run), and confirmed a second `accept-proposal` call on the new
 run (which has no proposal of its own) was refused with a real `409`.
 Dev database reset to empty afterward.
 
-**Deferred, not forgotten:** the frontend has no UI for proposals yet —
-no display of a proposed level alongside the user's own, no "Accept
-proposal" button. This mirrors exactly how 6C built every pipeline tool
-(`capture/`, `tools/market_data.py`, `agents/trade_agent.py`, `evals/`,
-`guardrails/`) standalone and backend-only before Milestone 11 wired any
-of them into the UI. `frontend/src/api/types.ts` is additive-safe either
-way — the backend now returns `proposal`/`accepted_from_run_id` fields
-the frontend's TypeScript interfaces don't yet know about, which is
-silently ignored by `fetch`/`JSON.parse`, not a breaking change; all 32
-existing frontend tests pass unmodified. Wiring the UI is explicitly not
-part of this iteration's scope and hasn't been scheduled.
+**Deferred, not forgotten (superseded — see the addendum below):** the
+paragraph above reflects the state at the moment this entry was first
+written. Both the deferral and the "just seed a proposal by hand" manual
+verification it describes turned out to be premature — see
+"7A Iteration 1 addendum" immediately below for why, and for what
+actually shipped.
+
+## 7A Iteration 1 addendum — live verification, the DEMO fixture gap, and the UI
+
+Everything above this addendum was built and unit-tested, but verified
+manually by *seeding* a proposal directly via `database.crud` rather than
+by watching a real Claude call produce one. That gap was flagged
+explicitly, for a specific reason: **in 6C, `analysis_text` truncation
+passed every test and only surfaced on a live run** (see "fix: agent
+response truncation on live runs" above) — the same risk class applies
+here. The new prompt fields and the real parsing path were, at that
+point, completely unexercised against a real model. This addendum is the
+live verification, what it found, the fix, and the UI — all built before
+`7a-iteration-1` was allowed to move.
+
+### The first live pass: two declines, and why that was the right question to ask
+
+Two real Claude calls, DEMO capture + DEMO market data (the original
+`EURUSD_1h.png` fixture), no mocking of `TradeAgent` at all:
+
+- **RUN A** (`80da6bc69e304dff80d43159ac3d127f`, no user-supplied trade
+  params) and **RUN B** (`832f688577914e35840e62f461407459`, user levels
+  long 1.0950/1.0900/1.1050) both came back `"proposal_has_proposal":
+  false`, valid JSON on the first attempt, `stop_reason="end_turn"` both
+  times — enforcement never had to reject anything. RUN B's own
+  evaluation scored normally from the user's levels (`total_score=45`),
+  in a completely separate table from the (empty) proposal, exactly as
+  designed.
+- Both runs are preserved, untouched, in `database/tradepilot.db` as
+  direct evidence the declined path works end to end against a real
+  model — they were not reset or deleted.
+
+**Diagnosis, not an excuse:** the agent's own prose in both runs said
+plainly there was nothing to propose against (`setup_quality: NONE` /
+`MARGINAL`, "no crisp, high-confidence setup stands out"). The committed
+`EURUSD_1h.png` fixture (Milestone 5) is a *deliberately* abstract
+placeholder — a generic bar series plus a large "SAMPLE IMAGE" banner —
+built to exercise the five categorical fields, which degrade gracefully
+on a vague image (the agent always has `UNCLEAR` to fall back on). A
+proposed trade level has nothing to degrade to: it needs an actual
+visible price structure to anchor a stop and target to. **The fixture was
+adequate for 6C's categorical fields and not adequate for 7A's
+proposals.** The prompt was not touched, on purpose — declining was the
+prompted-for, correct behavior for that specific image, not a bug to
+patch around by changing the instructions.
+
+### The second live pass: real structure, real proposals
+
+`dry-run.ps1` swept 5 real LIVE candidates (real Playwright capture, real
+Alpha Vantage quote, real Claude call each) to find one with genuinely
+readable structure rather than guessing. EURUSD 4h won clearly (`UP/
+MODERATE` trend, `MIXED` structure, `ACCEPTABLE` setup, score 64,
+`READY_FOR_REVIEW`) — and that sweep run itself
+(`ed4e50b2e5b34d389f9734145dc7f53f`) had already produced a real,
+coherent proposal: `LONG 1.156/1.149/1.17`, `risk_reward_ratio≈2.0`,
+`is_coherent=true`, stored in `agent_proposals` — alongside a real
+`total_score=64` computed from the user's own levels in `evaluations`,
+confirming both live in separate places for a genuinely live run, not
+just a DEMO-seeded one.
+
+**Alpha Vantage's free-tier daily quota (25 requests) was exhausted
+partway through that sweep** — confirmed directly by the error text
+(`"our standard API rate limit is 25 requests per day"`), and it blocked
+a dedicated, freshly-instrumented LIVE RUN A. The orchestrator's own "no
+silent LIVE→DEMO fallback" invariant did exactly its job: market data
+failed honestly, the agent was never called (capture and market data must
+both succeed first), no data was fabricated. This project has no
+visibility into Alpha Vantage's exact remaining quota or reset time
+beyond that error text — worth checking the account dashboard directly if
+this matters again before the free-tier window resets.
+
+**The resulting hybrid, run for real and labeled as exactly what it
+is:** `cd25a285ea574501bf41a9a4cec26c32` — a real Playwright LIVE capture
+of a fresh EURUSD 4h chart, a real Claude call, but a DEMO market quote
+(Alpha Vantage exhausted), deliberately *paired* to the captured chart's
+own visible price (1.1558, its last real close) rather than the
+ordinary, unrelated demo price (1.0921) — pairing a quote nowhere near
+what's on the chart would have produced a nonsensical proposal and a bad
+fixture. Recorded in that run's own audit trail via a
+`hybrid_verification_note` event so nothing about this run's provenance
+depends on this document. Result: `proposal_has_proposal: true`,
+`LONG 1.1540/1.1480/1.1650`, `risk_reward_ratio≈1.83`, `is_coherent:
+true`, valid JSON, `stop_reason="end_turn"` — enforcement had nothing to
+reject. **The leak test, proven live, at the orchestrator level, with no
+user-supplied trade params:** `evaluations[0].status="FAILED"`,
+`risk_reward_ratio`/`risk_reward_score`/`total_score` all `NULL`
+(`TRADE_PARAMS_VALID` failing because there were no user params at all),
+while `agent_proposals.risk_reward_ratio=1.833...` is real, computed, and
+stored in a completely separate row. The same property this run proved
+live is also proven by a deterministic, always-run test:
+`test_orchestrator_never_lets_a_coherent_proposals_ratio_reach_the_runs_own_evaluation`
+in `tests/test_orchestrator.py`.
+
+**Answering the three questions plainly, for both live passes together:**
+the model populated proposal fields on the real-structure chart (twice —
+the sweep run and the hybrid run) and declined on the abstract fixture
+(twice); enforcement never had to reject anything on any of the four real
+calls (no boolean violation, no keyword violation, no incoherent
+proposal, no has_proposal/levels mismatch) — every violation this
+iteration guards against was proven exclusively by the 22 hand-built
+adversarial fixtures in `tests/test_agent.py`, which remains the
+authoritative enforcement evidence; live calls only ever tested whether a
+well-behaved model produces a well-shaped response, which it did, four
+times out of four.
+
+### The fix: a second, real, paired DEMO fixture — `chart_variant`
+
+Closing the actual gap (DEMO mode could never demonstrate a populated
+proposal) without touching the prompt:
+
+- **`capture/demo_provider.py`** — `DemoProvider.capture()` gained an
+  optional `chart_variant` parameter (`"unreadable_chart"`, the default —
+  reproduces the exact original single-fixture behavior — or
+  `"readable_chart"`). `demo_filename()` maps `"readable_chart"` to
+  `{SYMBOL}_{timeframe}_readable.png`. An unknown variant, or a variant
+  with no fixture for that symbol/timeframe (e.g. GBPUSD has no readable
+  fixture), fails cleanly — the same "never substitute" rule that already
+  governs an unrecognized symbol.
+- **`tools/market_data.py`** — `DemoMarketDataProvider.get_quote()` gained
+  the identical parameter, reading a new `"readable_price"` key from
+  `tools/demo_market_data.json` instead of the ordinary `"price"` key.
+  `CHART_VARIANT_UNREADABLE`/`READABLE` are duplicated between the two
+  files rather than cross-imported — `capture/` and `tools/` are
+  independent sibling packages, same reasoning `database/models.py`
+  already uses for its own duplicated small constants.
+- **`capture/manager.py` / `tools/market_data.py`'s managers** — both
+  thread `chart_variant` through to their DEMO provider only, via
+  `isinstance()` checks; a LIVE provider never receives it (it has no
+  such concept — confirmed by a test that would raise `TypeError` if the
+  manager tried).
+- **`backend/orchestrator.py`** — `run_pipeline()` gained a `chart_variant`
+  keyword, re-validated against a new `DEMO_CHART_VARIANTS` frozenset
+  (same defense-in-depth pattern as `force_scenario`), threaded to both
+  `capture_manager.capture()` and `market_data_manager.get_quote()`.
+  **Deliberately not gated behind `TESTING_CONTROLS_ENABLED`**, unlike
+  `force_scenario`: this never fabricates a failure, a stale timestamp,
+  or an outcome — it only picks between two real, honestly-labeled DEMO
+  fixtures, so the same production-safety concern that justifies gating
+  `force_scenario` doesn't apply here.
+- **`backend/api/routes_runs.py`** — `POST /runs/{run_id}/analyze` gained
+  an optional `demo_chart_variant` query parameter, validated the same
+  way, `422` on an unrecognized value.
+- **Freshness is untouched, structurally, not just by policy:** both
+  providers still call `datetime.now(timezone.utc)` at capture/fetch time
+  regardless of which fixture or price gets read — the exact Milestone 9
+  fix's own principle ("handle it in the provider, not the guardrail")
+  already made this true before `chart_variant` existed; this addendum
+  only had to confirm it stayed true, which a dedicated freshness test
+  does directly.
+- **The new fixture itself is not a stock image** —
+  `screenshots/demo/EURUSD_4h_readable.png` is the actual PNG captured
+  during the hybrid RUN A above, saved as a committed fixture.
+  `tools/demo_market_data.json`'s new `"readable_price": 1.1558` is that
+  same chart's own real last-visible close price, not an invented number.
+
+**Tests, 18 added (292 backend total, up from 274 — the count after the
+leak test and accept-endpoint edge-case tests below, which landed just
+before this addendum's live-verification work started):**
+
+- `tests/test_capture.py` — 8 added: default variant reproduces original
+  behavior, readable variant serves the readable fixture, its
+  `captured_at` is still fresh, an unknown variant fails cleanly, a
+  symbol with no readable fixture fails cleanly (not substituted), plus
+  three `CaptureManager`-level tests (threads to DEMO, omitted reproduces
+  original, ignored in LIVE mode — the mismatched-mode backstop itself
+  was already covered by a pre-existing test).
+- `tests/test_market_data.py` — 7 added: the identical shape of tests as
+  above, for the market-data side (default/readable/fresh
+  timestamp/missing-fixture-symbol, plus three `MarketDataManager`-level
+  tests).
+- `tests/test_orchestrator.py` — 3 added: `demo_chart_variant="readable_chart"`
+  end to end through the real API (real screenshot path, real paired
+  price), omitted reproduces the original screenshot/price exactly, an
+  unrecognized value refused with `422` and nothing written.
+
+All 292 backend tests pass. All 44 frontend tests pass (see the UI
+section below for what added the other 12).
+
+### The UI — built, not deferred
+
+The original entry's "Deferred, not forgotten" paragraph is superseded:
+a proposal panel, side-by-side display, accept-and-re-run control, and
+provenance link are all built, matching the original spec.
+
+- **`frontend/src/components/AgentProposalPanel.tsx`** (new) — visually
+  distinct from both the user's own levels and the scored result above it
+  (a dashed sky-blue border, the same "this is not a normal part of the
+  app" register `TestingControls.tsx` already uses for a different
+  reason). Four states, each explicit: no proposal data yet (empty
+  state); declined (a plain sentence, *never* an empty panel — plus the
+  agent's own `setup_assessment` prose shown as its stated reasoning when
+  available, since there's no dedicated "why declined" field); a coherent
+  proposal (levels shown, `risk_reward_ratio` labelled "informational
+  only — not part of the score", never rendered anywhere near
+  `ScoreBreakdown`'s real score); an incoherent proposal (the same levels,
+  plus the real `coherence_error` shown as a warning). When the run has
+  its own user-supplied levels, both render side by side
+  (`proposal-your-levels` / `proposal-agent-levels`, independently
+  queryable by test id) — never one replacing the other.
+- **`frontend/src/api/types.ts` / `api/client.ts`** — `AgentProposalOut`,
+  `RunSummary.accepted_from_run_id`, `RunDetail.proposal`,
+  `AcceptProposalResponse`, and `acceptProposal(runId)`. `guardrail_outcome`'s
+  existing precedent (always present, typed `| null`, never `?`) was
+  followed rather than making the two new fields optional — every
+  existing `RunDetail`/`RunSummary` test fixture across the frontend test
+  suite was updated to include them, the same "update every fixture when
+  the schema changes" precedent Milestone 8's revision already set.
+- **`App.tsx`** — `handleAcceptProposal()` calls `api.acceptProposal()`,
+  then "navigates" to the new run the exact same way clicking a row in
+  the run list already does (`selectRun()` fetches and displays it) —
+  there is no client-side router in this app, so this is what
+  "navigates" means here, consistently with how every other cross-run
+  jump in this UI already works.
+- **`RunDetailView.tsx`** — a new `Card` hosts the panel, placed directly
+  under "Evaluation" so the physical adjacency itself reinforces "here is
+  something that is explicitly not part of the score directly above it."
+  A run created via acceptance shows a provenance banner
+  (`Created by accepting an agent-proposed trade level from run
+  {accepted_from_run_id}`) with a clickable link back that calls the same
+  `selectRun()` App.tsx already exposes.
+- **Tests, 12 added (44 frontend total, up from 32):**
+  `AgentProposalPanel.test.tsx` (new, 11 tests) — empty/declined/
+  proposal/side-by-side/coherence-warning/accept-click/busy-state/
+  accept-error states, plus the two decline-reasoning tests (shown when
+  available, absent when not). `App.test.tsx` gained one integration
+  test: accepting calls `api.acceptProposal("run-1")`, then
+  `api.getRun("run-2")` is called for the new run, and its provenance
+  banner (with a link back to `run-1`) renders — the real end-to-end
+  path, not just the component in isolation.
+
+### Accept-endpoint edge cases — current behavior, and the tests that prove it
+
+All three were asked about explicitly; none needed a code change, since
+the endpoint was already unrestricted in the ways that matter and already
+refused what needed refusing:
+
+| Case | Behavior | Test |
+|---|---|---|
+| Accepting the same proposal twice | **Allowed.** Each acceptance only reads the source run's already-stored proposal row — it never mutates it — so repeated accepts are side-effect-free and simply spawn independent new runs. | `test_accepting_the_same_proposal_twice_creates_two_independent_runs` |
+| Accepting on a run itself created by acceptance (chaining) | **Allowed, not blocked.** The chain is fully traceable by walking `accepted_from_run_id` backward, one run at a time (C → B → A) — no dedicated multi-hop endpoint needed, since each run only ever records its own immediate source. | `test_accepting_a_proposal_on_a_run_created_by_acceptance_chains_and_is_traceable` |
+| Accepting a declined proposal | **Refused, `409`.** Nothing to accept. | `test_accept_proposal_on_a_declined_run_is_refused` |
+| Accepting when no proposal row exists at all (e.g. a failed capture, agent never called) | **Refused, `409`.** | `test_accept_proposal_on_a_run_with_no_proposal_row_at_all_is_refused` |
+| Accepting an *incoherent* proposal | **Allowed, deliberately.** The new run just carries the same incoherent numbers and fails `TRADE_PARAMS_VALID` once analyzed, exactly as it would if a human had typed bad numbers in by hand — accepting doesn't imply endorsing the math. | `test_accept_proposal_can_accept_an_incoherent_proposal` |
+| Accepting on a nonexistent run | **`404`.** | `test_accept_proposal_on_a_nonexistent_run_returns_404` |
+
+### What this means for demonstrating the feature going forward
+
+`demo_chart_variant=readable_chart` now reliably reproduces the *shape*
+of a proposing agent end to end in DEMO mode — real capture flow, real
+paired quote, a real Claude call against a chart that actually has
+something to propose against. The specific numbers and prose still vary
+call to call (the same nondeterminism any real Claude call always has),
+but the DEMO/LIVE architecture itself doesn't need to be exercised live
+to show the proposal feature working — the readable DEMO fixture carries
+that. The one thing DEMO can never demonstrate is the LIVE pipeline
+itself actually working end to end against the real internet (real
+Playwright, real Alpha Vantage) — showing that at all, even briefly, is
+the only genuinely LIVE-dependent segment left, and it isn't specific to
+7A: Milestone 12's own final review already named LIVE-mode mileage as
+this project's second-weakest area, before 7A existed.
 
 ## Roadmap
 

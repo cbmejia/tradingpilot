@@ -6,6 +6,7 @@ import { ChartCapturePanel } from "./ChartCapturePanel";
 import { MarketDataPanel } from "./MarketDataPanel";
 import { AgentAnalysisPanel } from "./AgentAnalysisPanel";
 import { ScoreBreakdown } from "./ScoreBreakdown";
+import { AgentProposalPanel } from "./AgentProposalPanel";
 import { GuardrailResultsPanel } from "./GuardrailResultsPanel";
 import { ReviewPanel } from "./ReviewPanel";
 
@@ -30,9 +31,22 @@ interface RunDetailViewProps {
   onApprove: (comment: string) => void;
   onReject: (comment: string) => void;
   reviewBusy: boolean;
+  onAcceptProposal: () => void;
+  acceptingProposal: boolean;
+  acceptProposalError: string | null;
+  onSelectRun: (runId: string) => void;
 }
 
-export function RunDetailView({ run, onApprove, onReject, reviewBusy }: RunDetailViewProps) {
+export function RunDetailView({
+  run,
+  onApprove,
+  onReject,
+  reviewBusy,
+  onAcceptProposal,
+  acceptingProposal,
+  acceptProposalError,
+  onSelectRun,
+}: RunDetailViewProps) {
   const demo = isDemoRun(run);
   const forced = forcedScenario(run);
 
@@ -44,6 +58,20 @@ export function RunDetailView({ run, onApprove, onReject, reviewBusy }: RunDetai
             Testing run — not a real analysis
           </p>
           <p className="mt-1 text-xs text-amber-300/90">{forced}</p>
+        </div>
+      )}
+
+      {run.accepted_from_run_id && (
+        <div className="rounded-md border border-sky-500/30 bg-sky-500/10 px-3 py-2 text-xs text-sky-300">
+          Created by accepting an agent-proposed trade level from{" "}
+          <button
+            type="button"
+            onClick={() => onSelectRun(run.accepted_from_run_id as string)}
+            className="font-semibold underline underline-offset-2 hover:text-sky-200"
+          >
+            run {run.accepted_from_run_id}
+          </button>
+          .
         </div>
       )}
 
@@ -74,6 +102,23 @@ export function RunDetailView({ run, onApprove, onReject, reviewBusy }: RunDetai
         subtitle="Each score shown next to the observation that produced it"
       >
         <ScoreBreakdown evaluation={run.evaluations[0]} analysis={run.analyses[0]} />
+      </Card>
+
+      <Card
+        title="Agent's trade level proposal"
+        subtitle="An alternative for comparison — never automatically scored"
+      >
+        <AgentProposalPanel
+          proposal={run.proposal ?? undefined}
+          userDirection={run.direction}
+          userEntry={run.entry}
+          userStop={run.stop}
+          userTarget={run.target}
+          agentReasoning={run.analyses[0]?.setup_assessment ?? null}
+          onAccept={onAcceptProposal}
+          accepting={acceptingProposal}
+          acceptError={acceptProposalError}
+        />
       </Card>
 
       <Card title="Guardrails" subtitle="All eleven checks, every time">

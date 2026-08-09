@@ -108,6 +108,18 @@ FORCE_SCENARIOS: frozenset[str] = frozenset(
     }
 )
 
+# 7A Iteration 1: which committed DEMO fixture (capture) / paired quote
+# (market data) to serve. Independent of FORCE_SCENARIOS -- this picks
+# between two real, honest sample data sets, it never fabricates a
+# failure or an outcome the way force_scenario does, so it is NOT gated
+# behind TESTING_CONTROLS_ENABLED. None (the default, and the only value
+# every caller before this addendum ever used) reproduces the exact
+# original single-fixture behavior. Only meaningful in DEMO mode --
+# CaptureManager/MarketDataManager both simply ignore it when running
+# LIVE. See capture/demo_provider.py and tools/market_data.py's own
+# CHART_VARIANT_* constants for the two allowed values.
+DEMO_CHART_VARIANTS: frozenset[str] = frozenset({"unreadable_chart", "readable_chart"})
+
 # How far in the past a "stale" forced timestamp is set -- comfortably
 # past any sane CAPTURE_MAX_AGE_SECONDS/MARKET_DATA_MAX_AGE_SECONDS
 # (defaults 300s/900s), so the freshness guardrail fails regardless of
@@ -415,7 +427,13 @@ def _evaluation_summary(result: EvaluationResult) -> str:
     return f"Evaluation failed: {result.error_message}"
 
 
-def run_pipeline(session: Session, run_id: str, *, force_scenario: Optional[str] = None) -> Run:
+def run_pipeline(
+    session: Session,
+    run_id: str,
+    *,
+    force_scenario: Optional[str] = None,
+    chart_variant: Optional[str] = None,
+) -> Run:
     """
     Runs the full capture -> market data -> agent -> evaluation ->
     guardrails pipeline for one run and persists every step, in order, as
@@ -430,6 +448,11 @@ def run_pipeline(session: Session, run_id: str, *, force_scenario: Optional[str]
     re-validates anyway, the same defense-in-depth pattern used
     everywhere else in this codebase.
 
+    chart_variant (7A Iteration 1): which committed DEMO fixture/paired
+    quote to use, see DEMO_CHART_VARIANTS above. None (the default)
+    reproduces the original single-fixture behavior exactly. Re-validated
+    here too, same defense-in-depth pattern as force_scenario.
+
     Raises RunAlreadyAnalyzedError if this run already has any pipeline
     results. Callers are expected to have already confirmed the run
     exists -- this function assumes it does.
@@ -437,6 +460,9 @@ def run_pipeline(session: Session, run_id: str, *, force_scenario: Optional[str]
     if force_scenario is not None and force_scenario not in FORCE_SCENARIOS:
         allowed = ", ".join(sorted(FORCE_SCENARIOS))
         raise ValueError(f"force_scenario must be one of: {allowed} (got {force_scenario!r})")
+    if chart_variant is not None and chart_variant not in DEMO_CHART_VARIANTS:
+        allowed = ", ".join(sorted(DEMO_CHART_VARIANTS))
+        raise ValueError(f"chart_variant must be one of: {allowed} (got {chart_variant!r})")
 
     run = crud.get_run(session, run_id)
     if run is None:
@@ -486,7 +512,9 @@ def run_pipeline(session: Session, run_id: str, *, force_scenario: Optional[str]
             capture_manager.mode, run.symbol, run.timeframe, force_scenario
         )
     else:
-        capture_result = capture_manager.capture(run.symbol, run.timeframe)
+        capture_result = capture_manager.capture(
+            run.symbol, run.timeframe, chart_variant=chart_variant
+        )
         if force_scenario == "capture_stale" and capture_result.status == CaptureStatus.SUCCESS:
             capture_result = dataclasses.replace(
                 capture_result, captured_at=capture_result.captured_at - _STALE_AGE
@@ -519,7 +547,7 @@ def run_pipeline(session: Session, run_id: str, *, force_scenario: Optional[str]
             market_data_manager.mode, run.symbol, force_scenario
         )
     else:
-        market_data_result = market_data_manager.get_quote(run.symbol)
+        market_data_result = market_data_manager.get_quote(run.symbol, chart_variant=chart_variant)
         if force_scenario == "market_data_stale" and market_data_result.status == MarketDataStatus.SUCCESS:
             market_data_result = dataclasses.replace(
                 market_data_result, timestamp=market_data_result.timestamp - _STALE_AGE

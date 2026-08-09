@@ -38,6 +38,18 @@ DEMO_FIXTURE_PATH = Path(__file__).resolve().parent / "demo_market_data.json"
 DEFAULT_TIMEOUT_SECONDS = 10  # hard cap on the live HTTP request -- no infinite waits
 ALPHA_VANTAGE_BASE_URL = "https://www.alphavantage.co/query"
 
+# 7A Iteration 1: mirrors capture/demo_provider.py's chart_variant values
+# (duplicated, not imported -- capture/ and tools/ are independent
+# sibling packages, neither depends on the other, same reasoning
+# database/models.py already uses for its own small duplicated constants).
+# "readable_price" pairs a quote to the SAME real chart
+# capture/demo_provider.py's "readable_chart" variant serves, so the price
+# shown to the agent is actually consistent with what's drawn on the
+# chart it's looking at -- a quote far outside the visible candle range
+# would make any proposed level nonsensical.
+CHART_VARIANT_UNREADABLE = "unreadable_chart"
+CHART_VARIANT_READABLE = "readable_chart"
+
 
 class MarketDataMode(str, Enum):
     LIVE = "LIVE"
@@ -109,7 +121,19 @@ class DemoMarketDataProvider(MarketDataProvider):
     def __init__(self, fixture_path: Path = DEMO_FIXTURE_PATH):
         self._fixture_path = fixture_path
 
-    def get_quote(self, symbol: str) -> MarketQuote:
+    def get_quote(
+        self, symbol: str, chart_variant: str = CHART_VARIANT_UNREADABLE
+    ) -> MarketQuote:
+        """
+        chart_variant (7A Iteration 1): "unreadable_chart" (the default,
+        and the only value every caller before this addendum ever used)
+        reads the fixture's ordinary "price" key, unchanged. "readable_chart"
+        reads "readable_price" instead -- paired to the same real chart
+        capture/demo_provider.py's readable_chart capture variant serves.
+        A symbol with no readable_price configured fails cleanly, the same
+        "never substitute" rule this provider already applies to an
+        unrecognized symbol.
+        """
         symbol = symbol.strip().upper()
         if not symbol:
             return self._failed(symbol, "Symbol must not be empty.")
@@ -128,9 +152,17 @@ class DemoMarketDataProvider(MarketDataProvider):
                 f"another pair's price.",
             )
 
+        price_key = "readable_price" if chart_variant == CHART_VARIANT_READABLE else "price"
+        if price_key not in entry:
+            return self._failed(
+                symbol,
+                f"No {chart_variant!r} demo quote for {symbol} (missing {price_key!r} in "
+                f"the fixture). DEMO mode never substitutes another variant's price.",
+            )
+
         try:
-            price = float(entry["price"])
-        except (KeyError, TypeError, ValueError) as exc:
+            price = float(entry[price_key])
+        except (TypeError, ValueError) as exc:
             return self._failed(symbol, f"Demo fixture for {symbol} is malformed: {exc}")
 
         return MarketQuote(
@@ -322,8 +354,18 @@ class MarketDataManager:
     def mode(self) -> MarketDataMode:
         return self._mode
 
-    def get_quote(self, symbol: str) -> MarketQuote:
-        result = self._provider.get_quote(symbol)
+    def get_quote(self, symbol: str, chart_variant: Optional[str] = None) -> MarketQuote:
+        """
+        chart_variant (7A Iteration 1): forwarded to DemoMarketDataProvider
+        only -- LiveMarketDataProvider has no such concept (a live quote
+        is just whatever the real price is). None (the default, and the
+        only value every caller before this addendum ever used)
+        reproduces the exact prior behavior.
+        """
+        if chart_variant is not None and isinstance(self._provider, DemoMarketDataProvider):
+            result = self._provider.get_quote(symbol, chart_variant=chart_variant)
+        else:
+            result = self._provider.get_quote(symbol)
 
         if result.mode is not self._mode:
             # Same structural backstop as CaptureManager: a provider bug

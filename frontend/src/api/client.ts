@@ -8,6 +8,7 @@
 // instead of a request that silently hangs forever.
 
 import type {
+  AcceptProposalResponse,
   HumanReviewRequest,
   HumanReviewResponse,
   RunCreateRequest,
@@ -104,6 +105,18 @@ export function reviewRun(
   return request<HumanReviewResponse>(`/runs/${encodeURIComponent(runId)}/review`, {
     method: "POST",
     body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * 7A Iteration 1. Never rescores or re-analyzes runId -- it creates a
+ * brand-new run seeded with the agent's proposed levels, returned here.
+ * The caller still has to POST /runs/{newRunId}/analyze like any other
+ * run; accepting is not itself an analysis.
+ */
+export function acceptProposal(runId: string): Promise<AcceptProposalResponse> {
+  return request<AcceptProposalResponse>(`/runs/${encodeURIComponent(runId)}/accept-proposal`, {
+    method: "POST",
   });
 }
 

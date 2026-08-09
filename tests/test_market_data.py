@@ -84,6 +84,46 @@ def test_demo_source_is_clearly_marked_as_sample_data():
 
 
 # ---------------------------------------------------------------------------
+# chart_variant (7A Iteration 1) -- pairs a quote to the same real chart
+# capture/demo_provider.py's "readable_chart" capture variant serves, so a
+# proposed level has a price that's actually consistent with what's drawn
+# on the chart. No test here makes a real network call.
+# ---------------------------------------------------------------------------
+
+
+def test_demo_fetch_default_chart_variant_is_unchanged_from_before_this_addendum():
+    result = DemoMarketDataProvider().get_quote("EURUSD")
+
+    assert result.price == 1.0921
+
+
+def test_demo_fetch_readable_chart_variant_returns_the_paired_price():
+    result = DemoMarketDataProvider().get_quote("EURUSD", chart_variant="readable_chart")
+
+    assert result.status == MarketDataStatus.SUCCESS
+    assert result.price == 1.1558
+
+
+def test_demo_fetch_readable_chart_timestamp_is_still_generated_fresh():
+    before = datetime.now(timezone.utc)
+    result = DemoMarketDataProvider().get_quote("EURUSD", chart_variant="readable_chart")
+    after = datetime.now(timezone.utc)
+
+    assert before <= result.timestamp <= after
+
+
+def test_demo_fetch_readable_chart_variant_missing_for_a_symbol_fails_cleanly():
+    """GBPUSD has no readable_price configured -- must fail exactly like an
+    unrecognized symbol does, never fall back to GBPUSD's ordinary price
+    or to a different symbol's readable price."""
+    result = DemoMarketDataProvider().get_quote("GBPUSD", chart_variant="readable_chart")
+
+    assert result.status == MarketDataStatus.FAILED
+    assert result.price is None
+    assert "GBPUSD" in result.error_message
+
+
+# ---------------------------------------------------------------------------
 # MarketDataManager
 # ---------------------------------------------------------------------------
 
@@ -149,6 +189,37 @@ def test_manager_raises_if_a_provider_mislabels_its_result():
 
     with pytest.raises(RuntimeError):
         manager.get_quote("EURUSD")
+
+
+def test_manager_threads_chart_variant_to_the_demo_provider():
+    manager = MarketDataManager(mode="demo")
+
+    result = manager.get_quote("EURUSD", chart_variant="readable_chart")
+
+    assert result.status == MarketDataStatus.SUCCESS
+    assert result.price == 1.1558
+
+
+def test_manager_omits_chart_variant_reproduces_original_behavior():
+    manager = MarketDataManager(mode="demo")
+
+    result = manager.get_quote("EURUSD")
+
+    assert result.price == 1.0921
+
+
+def test_manager_ignores_chart_variant_in_live_mode():
+    """chart_variant is a DEMO-only concept -- a LIVE provider has no such
+    parameter, so the manager must never pass it through to one."""
+    manager = MarketDataManager(mode="live", provider=_FakeFailingLiveProvider())
+
+    # Would raise a TypeError if the manager tried to call
+    # _FakeFailingLiveProvider.get_quote(symbol, chart_variant=...) -- that
+    # provider's get_quote() only accepts (symbol,).
+    result = manager.get_quote("EURUSD", chart_variant="readable_chart")
+
+    assert result.mode == MarketDataMode.LIVE
+    assert result.status == MarketDataStatus.FAILED
 
 
 # ---------------------------------------------------------------------------

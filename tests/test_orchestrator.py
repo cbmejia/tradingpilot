@@ -66,6 +66,8 @@ GOOD_RUN_PAYLOAD = {
     "target": 1.1050,
 }
 
+NO_LEVELS_PAYLOAD = {"symbol": "EURUSD", "timeframe": "1h"}
+
 
 def _good_agent_result(**overrides) -> AgentAnalysisResult:
     defaults = dict(
@@ -568,6 +570,59 @@ def test_agent_declining_a_proposal_is_recorded(client):
     assert body["proposal"]["is_coherent"] is None
 
 
+def test_orchestrator_never_lets_a_coherent_proposals_ratio_reach_the_runs_own_evaluation(client):
+    """THE LEAK TEST, at the orchestrator/persisted-row level -- not the
+    evaluator's own function signature (see
+    test_evaluator_result_is_identical_with_or_without_a_stored_proposal
+    in tests/test_evaluation.py for that, narrower, level). A run created
+    with NO user-supplied trade params has nothing for
+    evals.trade_evaluator.evaluate() to score -- its own
+    risk_reward_ratio, risk_reward_score, and total_score must all stay
+    NULL -- even though the agent proposed fully coherent levels of its
+    own, with a real, non-null risk_reward_ratio stored on the proposal
+    row. If this ever fails, the proposal's arithmetic started leaking
+    into the run's own score through the real orchestrator code path, not
+    just a hand-built fixture."""
+    created = client.post("/runs", json=NO_LEVELS_PAYLOAD).json()
+
+    proposing_agent = _good_agent_result(
+        proposal_has_proposal=True,
+        proposal_direction="LONG",
+        proposal_entry=1.1000,
+        proposal_stop=1.0950,
+        proposal_target=1.1100,
+    )
+    with _patched_agent(proposing_agent):
+        response = client.post(f"/runs/{created['id']}/analyze")
+
+    assert response.status_code == 200
+    body = response.json()
+
+    # The run's OWN evaluation has nothing to score -- no user trade
+    # params were ever supplied, so evaluate() fails before it ever
+    # computes anything.
+    assert body["evaluations"][0]["status"] == "FAILED"
+    assert body["evaluations"][0]["risk_reward_ratio"] is None
+    assert body["evaluations"][0]["risk_reward_score"] is None
+    assert body["evaluations"][0]["total_score"] is None
+
+    # The proposal's OWN ratio is real and non-null -- computed and
+    # stored by the orchestrator, but never merged into the evaluation
+    # above.
+    assert body["proposal"]["has_proposal"] is True
+    assert body["proposal"]["is_coherent"] is True
+    assert body["proposal"]["risk_reward_ratio"] == pytest.approx(2.0)
+
+    # TRADE_PARAMS_VALID blocks because the RUN has no user params -- a
+    # completely separate concern from the proposal's own coherence,
+    # which was computed for a different set of numbers entirely.
+    trade_params_check = next(
+        g for g in body["guardrail_results"] if g["guardrail_name"] == "TRADE_PARAMS_VALID"
+    )
+    assert trade_params_check["passed"] is False
+    assert body["guardrail_outcome"] == "BLOCKED"
+
+
 def test_agent_analysis_finished_audit_event_mentions_the_proposal_outcome(client):
     created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
 
@@ -686,6 +741,134 @@ def test_accept_proposal_on_a_nonexistent_run_returns_404(client):
     response = client.post("/runs/does-not-exist/accept-proposal")
 
     assert response.status_code == 404
+
+
+# --- Edge cases: current behavior confirmed by these tests, not just
+# asserted. Accepting is deliberately unrestricted in both ways below --
+# each acceptance only reads the source run's already-stored proposal
+# row, it never mutates it and has no side effect beyond creating one new
+# row -- so there's no correctness or safety reason to forbid either
+# repeat acceptance or chaining. Declining-run refusal is already covered
+# by test_accept_proposal_on_a_declined_run_is_refused above; the
+# no-proposal-row and nonexistent-run refusals by
+# test_accept_proposal_on_a_run_with_no_proposal_row_at_all_is_refused and
+# test_accept_proposal_on_a_nonexistent_run_returns_404. ---
+
+
+def test_accepting_the_same_proposal_twice_creates_two_independent_runs(client):
+    created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
+    proposing_agent = _good_agent_result(
+        proposal_has_proposal=True,
+        proposal_direction="LONG",
+        proposal_entry=1.1000,
+        proposal_stop=1.0950,
+        proposal_target=1.1100,
+    )
+    with _patched_agent(proposing_agent):
+        client.post(f"/runs/{created['id']}/analyze")
+
+    first = client.post(f"/runs/{created['id']}/accept-proposal")
+    second = client.post(f"/runs/{created['id']}/accept-proposal")
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert first.json()["id"] != second.json()["id"]
+    assert first.json()["accepted_from_run_id"] == created["id"]
+    assert second.json()["accepted_from_run_id"] == created["id"]
+
+    # The source run's own proposal row is unchanged by either acceptance
+    # -- accepting reads it, it never writes to it.
+    source_run = client.get(f"/runs/{created['id']}").json()
+    assert source_run["proposal"]["entry"] == 1.1000
+
+
+def test_accepting_a_proposal_on_a_run_created_by_acceptance_chains_and_is_traceable(client):
+    """Accepting on a run that was itself created by acceptance is not
+    blocked -- chains are traceable by walking accepted_from_run_id back,
+    one run at a time: C -> B -> A."""
+    run_a = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
+    with _patched_agent(
+        _good_agent_result(
+            proposal_has_proposal=True,
+            proposal_direction="LONG",
+            proposal_entry=1.1000,
+            proposal_stop=1.0950,
+            proposal_target=1.1100,
+        )
+    ):
+        client.post(f"/runs/{run_a['id']}/analyze")
+    run_b = client.post(f"/runs/{run_a['id']}/accept-proposal").json()
+
+    # run_b needs its own real analysis (with its own proposal) before it
+    # can itself be accepted from.
+    with _patched_agent(
+        _good_agent_result(
+            proposal_has_proposal=True,
+            proposal_direction="LONG",
+            proposal_entry=1.1050,
+            proposal_stop=1.1000,
+            proposal_target=1.1150,
+        )
+    ):
+        client.post(f"/runs/{run_b['id']}/analyze")
+    run_c_response = client.post(f"/runs/{run_b['id']}/accept-proposal")
+
+    assert run_c_response.status_code == 201
+    run_c = run_c_response.json()
+    assert run_c["accepted_from_run_id"] == run_b["id"]
+
+    run_b_detail = client.get(f"/runs/{run_b['id']}").json()
+    assert run_b_detail["accepted_from_run_id"] == run_a["id"]
+    run_a_detail = client.get(f"/runs/{run_a['id']}").json()
+    assert run_a_detail["accepted_from_run_id"] is None
+
+
+# ---------------------------------------------------------------------------
+# demo_chart_variant (7A Iteration 1) -- end to end through the real API.
+# See capture/demo_provider.py and tools/market_data.py's own tests for
+# the provider/manager-level coverage; these confirm the query param
+# actually reaches run_pipeline() and produces the paired chart+quote.
+# ---------------------------------------------------------------------------
+
+READABLE_CHART_PAYLOAD = {"symbol": "EURUSD", "timeframe": "4h"}
+
+
+def test_demo_chart_variant_readable_serves_the_paired_chart_and_quote(client):
+    created = client.post("/runs", json=READABLE_CHART_PAYLOAD).json()
+
+    with _patched_agent(_good_agent_result()):
+        response = client.post(
+            f"/runs/{created['id']}/analyze", params={"demo_chart_variant": "readable_chart"}
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["captures"][0]["status"] == "SUCCESS"
+    assert body["captures"][0]["screenshot_path"].endswith("EURUSD_4h_readable.png")
+    assert body["market_data"][0]["price"] == 1.1558
+
+
+def test_demo_chart_variant_omitted_reproduces_original_behavior(client):
+    created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
+
+    with _patched_agent(_good_agent_result()):
+        response = client.post(f"/runs/{created['id']}/analyze")
+
+    body = response.json()
+    assert body["captures"][0]["screenshot_path"].endswith("EURUSD_1h.png")
+    assert body["market_data"][0]["price"] == 1.0921
+
+
+def test_unknown_demo_chart_variant_value_is_rejected(client):
+    created = client.post("/runs", json=GOOD_RUN_PAYLOAD).json()
+
+    response = client.post(
+        f"/runs/{created['id']}/analyze", params={"demo_chart_variant": "not_a_real_variant"}
+    )
+
+    assert response.status_code == 422
+    full_run = client.get(f"/runs/{created['id']}").json()
+    assert full_run["captures"] == []
 
 
 # ---------------------------------------------------------------------------

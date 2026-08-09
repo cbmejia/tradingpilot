@@ -77,6 +77,67 @@ def test_demo_captured_at_is_timezone_aware_utc():
 
 
 # ---------------------------------------------------------------------------
+# chart_variant (7A Iteration 1) -- a second, real, readable DEMO fixture
+# alongside the original abstract one. See capture/demo_provider.py's
+# module docstring for why this exists: a real live-run pass showed the
+# agent correctly declining to propose trade levels against the abstract
+# EURUSD_1h.png (no visible price structure to anchor a level to), then
+# correctly proposing against a real chart with visible structure. No
+# test here makes a real network or API call -- these only prove the
+# provider correctly serves one committed file or the other.
+# ---------------------------------------------------------------------------
+
+
+def test_demo_capture_default_chart_variant_is_unchanged_from_before_this_addendum():
+    """Regression guard: not passing chart_variant at all reproduces the
+    exact original behavior -- same file, same filename."""
+    result = DemoProvider().capture("EURUSD", "1h")
+
+    assert result.screenshot_path.endswith(demo_filename("EURUSD", "1h"))
+    assert result.screenshot_path.endswith(demo_filename("EURUSD", "1h", "unreadable_chart"))
+
+
+def test_demo_capture_readable_chart_variant_serves_the_readable_fixture():
+    result = DemoProvider().capture("EURUSD", "4h", chart_variant="readable_chart")
+
+    assert result.mode == CaptureMode.DEMO
+    assert result.status == CaptureStatus.SUCCESS
+    assert result.screenshot_path is not None
+    assert result.screenshot_path.endswith("EURUSD_4h_readable.png")
+    assert Path(result.screenshot_path).is_file()
+
+
+def test_demo_capture_readable_chart_captured_at_is_still_fresh():
+    """The freshness fix (Milestone 9) is generated at call time regardless
+    of which fixture file gets read -- confirming chart_variant didn't
+    quietly reintroduce a stale/fixed timestamp for the new fixture."""
+    result = DemoProvider().capture("EURUSD", "4h", chart_variant="readable_chart")
+
+    assert result.captured_at is not None
+    assert result.captured_at.tzinfo is not None
+    assert result.captured_at.utcoffset() == timedelta(0)
+
+
+def test_demo_capture_unknown_chart_variant_fails_cleanly():
+    result = DemoProvider().capture("EURUSD", "1h", chart_variant="not_a_real_variant")
+
+    assert result.status == CaptureStatus.FAILED
+    assert result.screenshot_path is None
+    assert "chart_variant" in result.error_message
+
+
+def test_demo_capture_readable_variant_missing_for_a_symbol_fails_cleanly_not_substituted():
+    """GBPUSD has no readable_chart fixture -- this must fail exactly like
+    an unknown symbol does, never silently fall back to the unreadable one
+    or to a different pair's readable chart."""
+    result = DemoProvider().capture("GBPUSD", "4h", chart_variant="readable_chart")
+
+    assert result.status == CaptureStatus.FAILED
+    assert result.screenshot_path is None
+    assert "GBPUSD" in result.error_message
+
+
+# ---------------------------------------------------------------------------
 # CaptureManager
 # ---------------------------------------------------------------------------
 
@@ -154,6 +215,37 @@ def test_capture_manager_raises_if_a_provider_mislabels_its_result():
 
     with pytest.raises(RuntimeError):
         manager.capture("EURUSD", "1h")
+
+
+def test_capture_manager_threads_chart_variant_to_the_demo_provider():
+    manager = CaptureManager(mode="demo")
+
+    result = manager.capture("EURUSD", "4h", chart_variant="readable_chart")
+
+    assert result.status == CaptureStatus.SUCCESS
+    assert result.screenshot_path.endswith("EURUSD_4h_readable.png")
+
+
+def test_capture_manager_omits_chart_variant_reproduces_original_behavior():
+    manager = CaptureManager(mode="demo")
+
+    result = manager.capture("EURUSD", "1h")
+
+    assert result.screenshot_path.endswith(demo_filename("EURUSD", "1h"))
+
+
+def test_capture_manager_ignores_chart_variant_in_live_mode():
+    """chart_variant is a DEMO-only concept -- a LIVE provider has no such
+    parameter, so the manager must never pass it through to one."""
+    manager = CaptureManager(mode="live", provider=_FakeFailingLiveProvider())
+
+    # Would raise a TypeError if the manager tried to call
+    # _FakeFailingLiveProvider.capture(symbol, timeframe, chart_variant=...)
+    # -- that provider's capture() only accepts (symbol, timeframe).
+    result = manager.capture("EURUSD", "1h", chart_variant="readable_chart")
+
+    assert result.mode == CaptureMode.LIVE
+    assert result.status == CaptureStatus.FAILED
 
 
 # ---------------------------------------------------------------------------

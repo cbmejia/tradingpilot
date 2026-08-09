@@ -15,6 +15,7 @@ function partialRun(overrides: Partial<RunDetail>): RunDetail {
     status: "ANALYZING",
     created_at: "2026-01-01T00:00:00Z",
     completed_at: null,
+    accepted_from_run_id: null,
     captures: [],
     market_data: [],
     analyses: [],
@@ -23,6 +24,7 @@ function partialRun(overrides: Partial<RunDetail>): RunDetail {
     human_review: null,
     audit_events: [],
     guardrail_outcome: null,
+    proposal: null,
     ...overrides,
   };
 }

@@ -89,6 +89,27 @@ export interface AuditEventOut {
   timestamp: string;
 }
 
+// 7A Iteration 1. has_proposal=false means the agent was asked and
+// declined -- direction/entry/stop/target/risk_reward_ratio/is_coherent/
+// coherence_error are all null in that case, never a fabricated
+// placeholder. has_proposal=true always has direction/entry/stop/target
+// populated, and then either risk_reward_ratio (coherent) or
+// coherence_error (incoherent) populated, never both. This is
+// informational only -- it never appears anywhere the run's own
+// evaluation or guardrail outcome reads from.
+export interface AgentProposalOut {
+  id: number;
+  has_proposal: boolean;
+  direction: string | null;
+  entry: number | null;
+  stop: number | null;
+  target: number | null;
+  risk_reward_ratio: number | null;
+  is_coherent: boolean | null;
+  coherence_error: string | null;
+  timestamp: string;
+}
+
 export interface RunSummary {
   id: string;
   symbol: string;
@@ -100,6 +121,11 @@ export interface RunSummary {
   status: string;
   created_at: string;
   completed_at: string | null;
+  // 7A Iteration 1: set only on a run created via
+  // POST /runs/{run_id}/accept-proposal -- the id of the run whose
+  // agent-proposed levels became this run's own entry/stop/target. Null
+  // for every ordinary, hand-entered run.
+  accepted_from_run_id: string | null;
 }
 
 export interface RunDetail extends RunSummary {
@@ -111,6 +137,10 @@ export interface RunDetail extends RunSummary {
   human_review: HumanReviewOut | null;
   audit_events: AuditEventOut[];
   guardrail_outcome: GuardrailOutcome | null;
+  // 7A Iteration 1: null if the agent analysis never succeeded (the
+  // question of a proposal was never reached) -- see AgentProposalOut for
+  // the has_proposal=false vs. absent distinction.
+  proposal: AgentProposalOut | null;
 }
 
 export interface RunListResponse {
@@ -145,6 +175,21 @@ export interface HumanReviewResponse {
   decided_at: string;
   comment: string | null;
   run_status: string;
+}
+
+// 7A Iteration 1. What POST /runs/{run_id}/accept-proposal sends back:
+// the brand-new run it just created (not the source run). This never
+// touches the source run's own score or guardrail outcome.
+export interface AcceptProposalResponse {
+  id: string;
+  accepted_from_run_id: string;
+  symbol: string;
+  timeframe: string;
+  direction: string;
+  entry: number;
+  stop: number;
+  target: number;
+  status: string;
 }
 
 // The eight timeframes backend/schemas.py's ALLOWED_TIMEFRAMES accepts.

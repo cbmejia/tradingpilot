@@ -17,6 +17,7 @@ vi.mock("./api/client", async () => {
     getRun: vi.fn(),
     listRuns: vi.fn(),
     reviewRun: vi.fn(),
+    acceptProposal: vi.fn(),
     screenshotUrl: (runId: string) => `http://127.0.0.1:8000/runs/${runId}/screenshot`,
   };
 });
@@ -37,6 +38,7 @@ function demoRun(overrides: Partial<RunDetail> = {}): RunDetail {
     status: "REQUIRES_REVIEW",
     created_at: "2026-01-01T00:00:00Z",
     completed_at: "2026-01-01T00:00:05Z",
+    accepted_from_run_id: null,
     captures: [
       {
         id: 1,
@@ -100,6 +102,7 @@ function demoRun(overrides: Partial<RunDetail> = {}): RunDetail {
     human_review: null,
     audit_events: [],
     guardrail_outcome: "REQUIRES_REVIEW",
+    proposal: null,
     ...overrides,
   };
 }
@@ -111,6 +114,7 @@ describe("App", () => {
     vi.mocked(api.createRun).mockReset();
     vi.mocked(api.analyzeRun).mockReset();
     vi.mocked(api.reviewRun).mockReset();
+    vi.mocked(api.acceptProposal).mockReset();
   });
 
   it("shows a clear message instead of hanging when the backend is unreachable", async () => {
@@ -227,6 +231,7 @@ describe("App", () => {
           status: "BLOCKED",
           created_at: "2026-01-01T00:00:00Z",
           completed_at: "2026-01-01T00:00:05Z",
+          accepted_from_run_id: null,
         },
       ],
       limit: 10,
@@ -255,5 +260,73 @@ describe("App", () => {
     await waitFor(() =>
       expect(api.reviewRun).toHaveBeenCalledWith("run-1", { decision: "REJECTED", comment: null }),
     );
+  });
+
+  it("7A Iteration 1: accepting a proposal calls acceptProposal and navigates to the new run", async () => {
+    const user = userEvent.setup();
+    const sourceRun = demoRun({
+      id: "run-1",
+      proposal: {
+        id: 1,
+        has_proposal: true,
+        direction: "LONG",
+        entry: 1.1,
+        stop: 1.095,
+        target: 1.11,
+        risk_reward_ratio: 2.0,
+        is_coherent: true,
+        coherence_error: null,
+        timestamp: "2026-01-01T00:00:04Z",
+      },
+    });
+    const newRun = demoRun({
+      id: "run-2",
+      status: "CREATED",
+      guardrail_outcome: null,
+      accepted_from_run_id: "run-1",
+      direction: "LONG",
+      entry: 1.1,
+      stop: 1.095,
+      target: 1.11,
+      captures: [],
+      market_data: [],
+      analyses: [],
+      evaluations: [],
+      guardrail_results: [],
+      audit_events: [],
+      proposal: null,
+    });
+
+    vi.mocked(api.createRun).mockResolvedValue({ id: "run-1", status: "CREATED" });
+    vi.mocked(api.analyzeRun).mockResolvedValue(sourceRun);
+    vi.mocked(api.getRun).mockImplementation((runId: string) =>
+      Promise.resolve(runId === "run-2" ? newRun : sourceRun),
+    );
+    vi.mocked(api.acceptProposal).mockResolvedValue({
+      id: "run-2",
+      accepted_from_run_id: "run-1",
+      symbol: "EURUSD",
+      timeframe: "1h",
+      direction: "LONG",
+      entry: 1.1,
+      stop: 1.095,
+      target: 1.11,
+      status: "CREATED",
+    });
+
+    render(<App />);
+
+    await user.click(screen.getByRole("button", { name: /^analyze$/i }));
+    await waitFor(() => expect(api.analyzeRun).toHaveBeenCalled());
+
+    await user.click(await screen.findByRole("button", { name: /accept proposal/i }));
+
+    await waitFor(() => expect(api.acceptProposal).toHaveBeenCalledWith("run-1"));
+    // "Navigates" to the new run the same way selecting a run from the
+    // list already does -- api.getRun is called for the new run's id,
+    // and its own provenance (accepted_from_run_id) is now on screen.
+    await waitFor(() => expect(api.getRun).toHaveBeenCalledWith("run-2"));
+    expect(await screen.findByText(/accepting an agent-proposed trade level from/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /run run-1/i })).toBeInTheDocument();
   });
 });

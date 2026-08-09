@@ -55,8 +55,20 @@ class CaptureManager:
     def mode(self) -> CaptureMode:
         return self._mode
 
-    def capture(self, symbol: str, timeframe: str) -> CaptureResult:
-        result = self._provider.capture(symbol, timeframe)
+    def capture(
+        self, symbol: str, timeframe: str, chart_variant: Optional[str] = None
+    ) -> CaptureResult:
+        """
+        chart_variant (7A Iteration 1): forwarded to DemoProvider only --
+        LiveProvider has no such concept, so it's simply not passed when
+        running LIVE. None (the default, and the only value every caller
+        before this addendum ever used) reproduces the exact prior
+        behavior.
+        """
+        if chart_variant is not None and isinstance(self._provider, DemoProvider):
+            result = self._provider.capture(symbol, timeframe, chart_variant=chart_variant)
+        else:
+            result = self._provider.capture(symbol, timeframe)
 
         if result.mode is not self._mode:
             # Structurally, this should never happen -- each provider only

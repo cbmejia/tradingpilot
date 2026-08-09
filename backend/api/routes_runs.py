@@ -24,7 +24,12 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from backend import config
-from backend.orchestrator import FORCE_SCENARIOS, RunAlreadyAnalyzedError, run_pipeline
+from backend.orchestrator import (
+    DEMO_CHART_VARIANTS,
+    FORCE_SCENARIOS,
+    RunAlreadyAnalyzedError,
+    run_pipeline,
+)
 from backend.schemas import (
     AcceptProposalResponse,
     HumanReviewRequest,
@@ -126,6 +131,17 @@ def analyze_run(
             "docs/failure_modes.md."
         ),
     ),
+    demo_chart_variant: Optional[str] = Query(
+        default=None,
+        description=(
+            "7A Iteration 1. Only meaningful in DEMO mode -- picks which committed "
+            "sample chart/paired quote to use ('unreadable_chart', the original abstract "
+            "placeholder, or 'readable_chart', a real chart with visible structure). Not "
+            "gated behind TESTING_CONTROLS_ENABLED: unlike force_scenario, this never "
+            "fabricates a failure or an outcome, it only picks between two real, honestly "
+            "labeled DEMO fixtures."
+        ),
+    ),
     session: Session = Depends(get_session),
 ) -> RunDetail:
     """
@@ -157,8 +173,16 @@ def analyze_run(
                 status_code=422, detail=f"force_scenario must be one of: {allowed}"
             )
 
+    if demo_chart_variant is not None and demo_chart_variant not in DEMO_CHART_VARIANTS:
+        allowed = ", ".join(sorted(DEMO_CHART_VARIANTS))
+        raise HTTPException(
+            status_code=422, detail=f"demo_chart_variant must be one of: {allowed}"
+        )
+
     try:
-        updated_run = run_pipeline(session, run_id, force_scenario=force_scenario)
+        updated_run = run_pipeline(
+            session, run_id, force_scenario=force_scenario, chart_variant=demo_chart_variant
+        )
     except RunAlreadyAnalyzedError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 
