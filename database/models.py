@@ -317,6 +317,12 @@ class AgentAnalysis(Base):
     setup_quality: Mapped[str | None] = mapped_column(String(20), nullable=True)
     context_risk: Mapped[str | None] = mapped_column(String(20), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 7A Iteration 3: the Claude model id this attempt was configured to
+    # call. Nullable -- NULL means no real call was ever attempted (an
+    # upstream stage failed first, or this is a synthetic force_scenario
+    # result), never a guess. See agents/trade_agent.py's
+    # AgentAnalysisResult.model docstring for the full reasoning.
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
 
     run: Mapped["Run"] = relationship(back_populates="analyses")
@@ -597,6 +603,9 @@ class ConfirmationAnalysis(Base):
     trend_direction: Mapped[str | None] = mapped_column(String(20), nullable=True)
     trend_quality: Mapped[str | None] = mapped_column(String(20), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 7A Iteration 3: same meaning and same NULL-only-when-no-real-call
+    # rule as AgentAnalysis.model above.
+    model: Mapped[str | None] = mapped_column(String(100), nullable=True)
     timestamp: Mapped[datetime] = mapped_column(TZDateTime, default=_now)
 
     run: Mapped["Run"] = relationship(back_populates="confirmation_analysis")

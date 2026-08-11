@@ -70,6 +70,7 @@ def _good_analysis(**overrides) -> AgentAnalysisResult:
         proposal_entry=None,
         proposal_stop=None,
         proposal_target=None,
+        model="claude-sonnet-5",
         timestamp=NOW - timedelta(seconds=5),
         error_message=None,
     )
@@ -297,6 +298,7 @@ def test_analysis_succeeded_fails_and_blocks_on_failed_analysis():
         proposal_entry=None,
         proposal_stop=None,
         proposal_target=None,
+        model=None,
         timestamp=None,
         error_message="No chart to analyze.",
     )
@@ -705,6 +707,7 @@ def _good_confirmation_result(**overrides) -> ConfirmationAnalysisResult:
         visible_timeframe="4h",
         trend_direction="UP",
         trend_quality="STRONG",
+        model="claude-sonnet-5",
         timestamp=NOW - timedelta(seconds=5),
         error_message=None,
     )

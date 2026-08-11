@@ -92,6 +92,7 @@ def _good_agent_result(**overrides) -> AgentAnalysisResult:
         proposal_entry=None,
         proposal_stop=None,
         proposal_target=None,
+        model="claude-sonnet-5",
         timestamp=datetime.now(timezone.utc),
         error_message=None,
     )
@@ -117,6 +118,7 @@ def _failed_agent_result(message="Claude's response could not be used: malformed
         proposal_entry=None,
         proposal_stop=None,
         proposal_target=None,
+        model="claude-sonnet-5",
         timestamp=None,
         error_message=message,
     )
@@ -152,6 +154,7 @@ def _good_confirmation_result(**overrides) -> ConfirmationAnalysisResult:
         visible_timeframe="4h",
         trend_direction="UP",
         trend_quality="STRONG",
+        model="claude-sonnet-5",
         timestamp=datetime.now(timezone.utc),
         error_message=None,
     )
@@ -167,6 +170,7 @@ def _failed_confirmation_result(
         visible_timeframe=None,
         trend_direction=None,
         trend_quality=None,
+        model="claude-sonnet-5",
         timestamp=None,
         error_message=message,
     )

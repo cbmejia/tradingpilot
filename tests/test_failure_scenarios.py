@@ -112,6 +112,7 @@ def test_a_normal_analysis_without_force_scenario_is_unaffected(client):
         setup_quality="ACCEPTABLE", context_risk="LOW",
         proposal_has_proposal=False, proposal_direction=None, proposal_entry=None,
         proposal_stop=None, proposal_target=None,
+        model="claude-sonnet-5",
         timestamp=datetime.now(timezone.utc), error_message=None,
     )
     # 7A Iteration 2: GOOD_PARAMS's EURUSD/1h has a real confirmation
@@ -124,6 +125,7 @@ def test_a_normal_analysis_without_force_scenario_is_unaffected(client):
         visible_timeframe="4h",
         trend_direction="UP",
         trend_quality="STRONG",
+        model="claude-sonnet-5",
         timestamp=datetime.now(timezone.utc),
         error_message=None,
     )

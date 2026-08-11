@@ -2986,6 +2986,306 @@ history permanently, the same as the live database always has.
 Final counts after this addendum: **351 backend tests, 52 frontend
 tests.**
 
+## 7A Iteration 3 — repeatability harness
+
+**Renumbered from the original plan.** The 7A plan in
+[docs/handoff.md](handoff.md) originally had Iteration 3 = economic
+calendar, Iteration 4 = this harness ("if time"). By the time this
+iteration started, Iteration 2's own addendum had already turned the
+harness from a nice-to-have into the direct follow-up to a real,
+on-record finding — identical DEMO input producing a 4:1 split on
+`trend_quality` (and a 45/55 split on `total_score`), measured by hand,
+n=5. Making that reproducible and cheap to re-run at a larger n was worth
+doing before economic calendar, which has no finding motivating it yet.
+Economic calendar is otherwise unaffected — same scope, moved to
+Iteration 4, not started.
+
+**The tension this iteration exists to resolve.** Iteration 2's finding
+was real but anecdotal: one person, watching five runs, by hand. That
+doesn't scale, isn't independently checkable by anyone who wasn't in the
+room, and can't answer the second question on record — does the agent's
+proposed risk/reward cluster on a user-supplied value, or float freely —
+which Iteration 1's addendum only had two data points for. A harness
+that anyone can re-run, at any n, against a byte-identical fixture,
+turns "trust me, I watched it happen" into a number with a file behind
+it.
+
+**Design approved before any code was written** (see the design message
+in this session's transcript for the full reasoning); three changes were
+made at approval time, all reflected below: default N dropped from 20 to
+10 (halves the cost of a result whose *shape* — that variation exists —
+was already known from n=5, on the eve of filming); three batches
+instead of four (a no-levels/proposals batch answers nothing, since RR
+clustering is only meaningful relative to a supplied value — deferred
+until the levels batch actually shows clustering); and the `model`
+column migration was required to get Iteration 2's exact treatment
+(backup first, raw `ALTER TABLE`, backfill NULL, re-verify all 9
+evidence runs before proceeding).
+
+### The `model` column — a real gap, closed independently of the harness
+
+Confirmed by reading the code before writing any migration: `agents/
+trade_agent.py`'s `TradeAgent` has resolved `self._model` since it was
+first written, and uses it on every call, but never persisted it
+anywhere — neither `agent_analyses` nor `confirmation_analyses` had a
+column for it. A stability number is meaningless without knowing which
+model produced it, so this was fixed as its own small, independently
+justified change, not a harness-only convenience:
+
+- `AgentAnalysisResult`/`ConfirmationAnalysisResult`
+  (`agents/trade_agent.py`) each gained a `model: Optional[str]` field,
+  populated by `TradeAgent` itself — recorded even on a **failed** call
+  (unlike the qualitative fields, which only exist once Claude actually
+  responds), because knowing *which model* failed is real diagnostic
+  information — see the earlier truncation-fix entry in this file,
+  diagnosed via a real response's `stop_reason`. `None` only when no real
+  call was ever attempted at all (an upstream stage failed first, or a
+  `force_scenario` synthetic result) — never a guess standing in for "we
+  don't know."
+- `database/crud.py`'s four analysis-writing functions
+  (`add_agent_analysis`/`add_failed_agent_analysis`/
+  `add_confirmation_analysis`/`add_failed_confirmation_analysis`) gained
+  an optional `model` parameter, `None` by default — optional at this
+  layer specifically because `NULL` is a legitimate, meaningful value
+  here (every pre-Iteration-3 row already has it), unlike the required
+  dataclass field it's read from.
+- `backend/orchestrator.py`'s four persistence call sites now pass
+  `model=agent_result.model` / `model=confirmation_agent_result.model`
+  through.
+- Every existing construction site (19 across `agents/trade_agent.py`,
+  `backend/orchestrator.py`, and four test files — `test_evaluation.py`,
+  `test_guardrails.py`, `test_orchestrator.py`, `test_failure_
+  scenarios.py`) needed the new field passed explicitly, the same
+  "no silent defaulting" pattern every categorical/proposal field
+  addition in this project has followed since the Milestone 8 revision.
+  Two README.md hand-run examples were found broken by this same check —
+  already broken before this change (missing Iteration 1's `proposal_*`
+  fields, confirmed by actually running the snippet) — fixed while
+  already touching the exact construction call, rather than left as a
+  known-broken copy-paste command in the docs.
+
+**The migration, given Iteration 2's exact treatment, as required:**
+
+1. `database/tradepilot.db.pre-iteration3-backup` — a byte-for-byte copy
+   of the live dev database, taken before anything else, confirmed
+   gitignored (`*.db.pre-*-backup`, added in Iteration 2) via
+   `git check-ignore -v`.
+2. Raw `ALTER TABLE agent_analyses ADD COLUMN model VARCHAR(100)` and the
+   same for `confirmation_analyses` — never delete-and-recreate. Row
+   counts confirmed unchanged (21 and 12) and every existing row's new
+   `model` column confirmed `NULL` (backfilled, never guessed) directly
+   against the file before any application code touched it.
+3. **All 9 evidence runs re-queried directly against the migrated
+   database and confirmed intact** before any further work: the 4
+   Iteration 1 runs (`80da6bc6...`, `832f6885...`, `ed4e50b2...`,
+   `cd25a285...` — proposals, coherence, and the leak-path evaluation all
+   unchanged) and the 5 Iteration 2 categorical-stability runs
+   (`c7ab7dd2...` through `75df8200...` — the 55×4/45×1 split still
+   exactly on record). Confirmed to the user directly before any further
+   schema or code change proceeded, per the explicit "if anything looks
+   wrong, stop — do not improvise a fix" instruction. Nothing looked
+   wrong.
+
+### The harness — `tools/repeatability_harness.py`
+
+A standalone CLI (`python -m tools.repeatability_harness`), calling
+`backend.orchestrator.run_pipeline()` directly — no HTTP server needed,
+same "direct Python invocation" pattern as `python -m database.init_db`.
+
+**Read-only with respect to scoring, enforced structurally, not just
+asserted.** The module never imports `evals/` at all — it only calls
+`run_pipeline()` (which internally uses `evals/trade_evaluator.py`,
+exactly as any other caller would) and reads results back through the
+ORM. Two tests prove this: a source-grep test (line-by-line, not a raw
+substring search — this module's own docstring describes the rule in
+prose, which would otherwise false-positive a naive check) confirming no
+`import evals`/`from evals` line exists; and a behavioral test that runs
+one batch through the harness and, separately, calls `run_pipeline()`
+directly for an equivalent run against an independent database with the
+same mocked agent, then asserts every score component is identical — the
+harness adds repetition, nothing else. A third test confirms every
+harness-created run carries its own `repeatability_harness_run` audit
+event, the same self-describing-provenance pattern `hybrid_verification_
+note` (Iteration 1) and `testing_scenario_forced` already use — no
+schema change needed to keep harness runs distinguishable from ordinary
+ones; they're simply new rows, self-identifying via their own audit
+trail, alongside the 9 evidence runs, untouched.
+
+**DEMO only by default, refused otherwise.** `CaptureManager`/
+`MarketDataManager` read `CAPTURE_MODE`/`MARKET_DATA_MODE` from `.env`
+with no per-call override — there is no parameter on `run_pipeline()` to
+force DEMO — so the only way to guarantee this never burns a LIVE Alpha
+Vantage quota by accident is to check both settings before creating a
+single run. `_live_guard()` refuses immediately unless `--allow-live` is
+passed explicitly; even then, N is hard-capped at 5 regardless of `--n`
+— the flag only lifts the refusal, it never changes what N means. Four
+tests cover this directly, including the case where only one of the two
+modes is LIVE (still refused — a DEMO capture paired with a real LIVE
+quote would still burn quota).
+
+**Worth recording here, found the night this was built, not by the
+harness itself:** `.env` was set to `CAPTURE_MODE=live`/`MARKET_DATA_MODE
+=live` when this iteration started — left over from earlier LIVE
+verification work, not `demo` as `docs/handoff.md` says it should be
+"restored to." Caught before any batch ran (the guard would have refused
+outright without `--allow-live`, exactly as designed), and switched back
+to `demo` in `.env` before batch 1. Separately, two real LIVE runs
+(`USDCAD 1h`/`USDCAD 5m`, one of which hit Alpha Vantage's rate-limit
+message directly) appeared in the dev database mid-session, created
+through the ordinary `run_created`/`analysis_started` audit path — not
+`repeatability_harness_run` — meaning a separately-running backend
+process (which caches `CAPTURE_MODE`/`MARKET_DATA_MODE` at its own
+startup, independent of a later `.env` edit) served two real analyses
+while this iteration was in progress. Not part of this iteration's
+evidence, not touched, flagged here only so a future reader doesn't
+mistake them for harness output.
+
+**N: default dropped to 10** (from a first-draft proposal of 20) per
+explicit direction — halves the cost of a result whose shape was already
+known from Iteration 2's n=5, on the eve of filming. `--n` stays fully
+configurable; the cost estimate (measured `~12s/run` from Iteration 2's
+own 5-run batch, `created_at`→`completed_at` on the real rows) prints
+before any run starts.
+
+**Two fixture profiles, chosen for what each can and can't answer —
+stated in the design, not discovered after the fact:**
+
+- `stability`: `EURUSD 1h` primary / `4h` confirmation, `chart_variant=
+  readable_chart` — the pairing Iteration 2 recorded as "adopted going
+  forward." Answers question (a), categorical stability.
+- `proposals`: `EURUSD 4h` primary alone, `chart_variant=readable_chart`
+  — its confirmation timeframe (`1d`) has no committed fixture, so
+  `CROSS_TIMEFRAME_AGREEMENT` fails closed with an honest "no fixture"
+  reason on every run, by design, unrelated to proposals (which come
+  from the primary call only). The only readable fixture known to
+  produce proposals at all, so the only one that can answer question (b),
+  RR clustering. Per the explicit instruction, **the fourth combination
+  (`proposals`/no-levels) was not run** — RR clustering is only
+  meaningful relative to a supplied value, so a no-levels batch on this
+  fixture would show a spread with nothing to compare it to. See "What
+  batch 3 found" below for whether that control batch is now justified.
+
+**Attribution, only where exactly one field differs.** For each scored
+run whose `total_score` differs from the batch's modal (most common)
+6-field vector (the five categorical fields plus `uncertainty` —
+deliberately excluding the confirmation and proposal fields, neither of
+which drives `total_score`), the harness diffs it against the modal
+vector: exactly one differing field is named as the driver; more than
+one is reported as `"NOT cleanly attributable"` rather than guessed. Two
+tests cover both branches directly.
+
+**Failure handling: no retries, explicit denominators.** A per-run crash
+is caught, recorded as its own `HARNESS_FAILURE` entry with the real
+error text, and the batch continues to N — never retried, never silently
+dropped, matching the standing "a malformed response stays a FAILED
+analysis" precedent from the truncation-fix entry. A dedicated test
+injects a crash on run 2 of 3 and confirms the batch still completes runs
+1 and 3, reporting `2/3 completed, 1 failed` rather than aborting.
+
+**A real bug caught and fixed before this shipped, not by the harness
+itself:** the first version wrote every batch's output JSON to the real
+`measurements/` directory unconditionally — module-level constant, not
+test-isolated, the exact class of oversight `SessionLocal` had already
+needed a fix for. Running the test suite left 12 stray, tiny (n=1) JSON
+files sitting in the committed `measurements/` directory alongside the 3
+real batches. Fixed by making `MEASUREMENTS_DIR` patchable the same way
+`SessionLocal` already was (tests now set `monkeypatch.setattr(harness,
+"MEASUREMENTS_DIR", tmp_path)`); a second bug surfaced by that fix
+(`out_path.relative_to(REPO_ROOT)` raising `ValueError` when the output
+path isn't under the repo, e.g. under a test's `tmp_path`) was caught by
+actually re-running the tests after the first fix, not assumed away —
+fixed with a fallback to the absolute path rather than crashing a batch
+after all N runs had already completed. The 12 stray files were deleted
+by hand before committing; the 3 real batches were untouched throughout.
+
+### The three real batches, n=10 each, `claude-sonnet-5`, 2026-08-10/11
+
+All real Claude calls, real DEMO capture/quote, preserved as committed
+JSON in `measurements/`:
+
+**Batch 1 — `stability` / no user levels**
+(`measurements/stability_none_20260811T015052Z.json`). All 10 runs
+`BLOCKED` (no trade params to score — expected, matches the equivalent
+row in Iteration 2 addendum's own table). `trend_quality`: `WEAK` ×9,
+`UNCLEAR` ×1. `trend_direction`: `UP` ×6, `UNCLEAR` ×4.
+`cross_timeframe_agreement_passed`: True ×6, False ×4. **One genuinely
+new finding, off the prior script:** 1 of 10 runs produced a real
+proposal (`RR≈1.88`) on the `1h`-readable fixture — the same fixture
+Iteration 2's addendum and this iteration's own design assumed
+"declines... consistently." That assumption was a description of what
+had been observed (`n` small, all prior observations declines), not a
+guaranteed property of the fixture; this batch is the first time it
+didn't hold. Recorded plainly rather than smoothed over — the fixture's
+declining behavior is now known to be a strong tendency (9/10 here), not
+an absolute.
+
+**Batch 2 — `stability` / `LONG 1.150/1.145/1.160` (RR=2.0)**
+(`measurements/stability_levels_20260811T015345Z.json`). All 10 runs
+`REQUIRES_REVIEW`. `total_score`: **55×7, 45×2, 35×1** — reproduces
+Iteration 2's own 55/45 split at 2x the sample size (10 vs 5) and adds a
+third value never seen at n=5. Attribution: both 45s driven cleanly by
+`trend_quality MODERATE→WEAK` (Δ=−10, matching Iteration 2's own
+diagnosis exactly); the 35 has two fields differing at once
+(`trend_quality`, `context_risk`) and is correctly reported as not
+cleanly attributable, rather than pinned on either field by guesswork.
+4/10 runs proposed, ratios `[1.40, 1.86, 1.67, 1.71]` — no exact match to
+the supplied `RR=2.0`, no obvious clustering either.
+
+**Batch 3 — `proposals` / `LONG 1.156/1.146/1.176` (RR=2.0)**
+(`measurements/proposals_levels_20260811T015634Z.json`). All 10 runs
+`REQUIRES_REVIEW`; `cross_timeframe_agreement_passed` False ×10 with the
+expected "no fixture" reason on every run. `total_score` ranged 45–72
+(spread 27) across 7 distinct values — the widest spread of the three
+batches, expected given this chart's categorical reads varied more
+(`trend_quality` STRONG×3/MODERATE×7, `structure_quality` CLEAN×1/
+MIXED×9, `setup_quality` ACCEPTABLE×7/MARGINAL×3). **9 of 10 runs
+proposed** — ratios `[2.14, 2.00, 2.07, 2.20, 2.00, 2.22, 1.82, 2.17,
+1.83]`, min 1.82, max 2.22, mean ≈2.02, two runs landing on exactly
+`2.0`. **This is the clustering signal the design flagged as the
+condition for approving a no-levels control batch on this fixture** — a
+tight band around the supplied value, not a wide, uncorrelated spread.
+Reported to the user as a finding, not acted on: **no no-levels batch on
+the `proposals` fixture has been run**, per the explicit "not before"
+instruction. Whether it's approved next is the user's call, not assumed
+here.
+
+### The scope limit, stated in the output itself, not just this document
+
+Both the terminal summary and every batch's JSON metadata carry this
+line verbatim (fixture/model/timestamp/n filled in per batch):
+
+> SCOPE LIMIT: these numbers describe one fixture, one model, one point
+> in time, n=10. They are not a general claim about the model's
+> reliability on real charts, other symbols or timeframes, or future
+> calls — n=10 on a single DEMO fixture is enough to show that variation
+> exists, not enough to characterize its full distribution.
+
+### Tests and counts
+
+19 backend tests added (**370 total, up from 351**): 3 for
+`agent_analyses.model` (round-trip, defaults-to-null, recorded-on-
+failure), 2 for `confirmation_analyses.model` (round-trip,
+defaults-to-null), and 14 for the harness itself (source-grep, the
+byte-identical-scoring behavioral test, the audit-event provenance test,
+four LIVE-guard tests, the mid-batch-failure test, three attribution
+tests, two RR-clustering tests, and the model-unavailable warning test).
+Frontend untouched — **52 tests, unchanged**, since this iteration has no
+UI surface. Full suite (370 backend + 52 frontend) run and passing
+before commit, same as every prior iteration.
+
+### What's committed, and what isn't
+
+`measurements/` is a new, tracked (not gitignored) top-level directory —
+recorded observations, not fixtures, with its own `README.md` explaining
+the distinction from `screenshots/demo/` (real inputs the pipeline
+reads) and `tests/` fixtures (hand-built inputs for deterministic
+tests). The 3 real batch files above are committed as the evidence
+behind this entry's numbers. `database/tradepilot.db` and the pre-
+migration backup remain gitignored, as always — the 9 evidence runs plus
+the 30 new harness-batch runs (10×3, each carrying its own
+`repeatability_harness_run` audit event) live only in the local dev
+database, not in git history.
+
 ## Roadmap
 
 1. ~~Architecture~~

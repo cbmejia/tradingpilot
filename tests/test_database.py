@@ -563,6 +563,71 @@ def test_save_failed_agent_analysis_stores_status_and_error_with_null_fields(ses
     assert analysis.context_risk is None
 
 
+def test_agent_analysis_model_round_trips(session):
+    """7A Iteration 3: the Claude model id survives a real commit +
+    refresh cycle, on both a successful and a failed analysis."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    crud.add_agent_analysis(
+        session,
+        run_id=run.id,
+        analysis_text="Uptrend.",
+        trend_assessment="up",
+        structure_assessment="clean",
+        setup_assessment="acceptable",
+        uncertainty="LOW",
+        trend_direction="UP",
+        trend_quality="STRONG",
+        structure_quality="CLEAN",
+        setup_quality="ACCEPTABLE",
+        context_risk="LOW",
+        model="claude-sonnet-5",
+    )
+
+    reloaded = crud.get_run(session, run.id)
+    assert reloaded.analyses[0].model == "claude-sonnet-5"
+
+
+def test_agent_analysis_model_defaults_to_null_when_omitted(session):
+    """Callers that don't know the model (e.g. pre-Iteration-3 code, or a
+    genuinely unresolvable configuration) get NULL, never a guess."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    analysis = crud.add_agent_analysis(
+        session,
+        run_id=run.id,
+        analysis_text="Uptrend.",
+        trend_assessment="up",
+        structure_assessment="clean",
+        setup_assessment="acceptable",
+        uncertainty="LOW",
+        trend_direction="UP",
+        trend_quality="STRONG",
+        structure_quality="CLEAN",
+        setup_quality="ACCEPTABLE",
+        context_risk="LOW",
+    )
+
+    assert analysis.model is None
+
+
+def test_failed_agent_analysis_can_record_the_model_that_failed(session):
+    """Knowing which model failed is real diagnostic information -- see
+    the truncation-fix entry in docs/iterations.md -- so model is
+    recorded on a FAILED row too, not just a SUCCESS one."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    analysis = crud.add_failed_agent_analysis(
+        session,
+        run_id=run.id,
+        error_message="Claude API request timed out after 60.0s",
+        model="claude-sonnet-5",
+    )
+
+    assert analysis.model == "claude-sonnet-5"
+    assert analysis.status == "FAILED"
+
+
 # ---------------------------------------------------------------------------
 # agent_proposals (7A Iteration 1)
 # ---------------------------------------------------------------------------
@@ -841,6 +906,37 @@ def test_save_failed_confirmation_analysis_stores_status_and_error_with_null_fie
     assert analysis.trend_direction is None
     assert analysis.trend_quality is None
     assert "Chart element" in analysis.error_message
+
+
+def test_confirmation_analysis_model_round_trips(session):
+    """7A Iteration 3: same round-trip guarantee as agent_analyses.model."""
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    crud.add_confirmation_analysis(
+        session,
+        run_id=run.id,
+        visible_timeframe="4h",
+        trend_direction="UP",
+        trend_quality="STRONG",
+        model="claude-sonnet-5",
+    )
+
+    reloaded = crud.get_run(session, run.id)
+    assert reloaded.confirmation_analysis.model == "claude-sonnet-5"
+
+
+def test_confirmation_analysis_model_defaults_to_null_when_omitted(session):
+    run = crud.create_run(session, symbol="EURUSD", timeframe="1h")
+
+    analysis = crud.add_confirmation_analysis(
+        session,
+        run_id=run.id,
+        visible_timeframe="4h",
+        trend_direction="UP",
+        trend_quality="STRONG",
+    )
+
+    assert analysis.model is None
 
 
 def test_run_relationship_reaches_its_confirmation_analysis(session):

@@ -157,6 +157,12 @@ analysis = AgentAnalysisResult(
     structure_quality='CLEAN',
     setup_quality='ACCEPTABLE',
     context_risk='LOW',
+    proposal_has_proposal=False,
+    proposal_direction=None,
+    proposal_entry=None,
+    proposal_stop=None,
+    proposal_target=None,
+    model='claude-sonnet-5',
     timestamp=datetime.now(timezone.utc),
     error_message=None,
 )
@@ -198,7 +204,10 @@ analysis = AgentAnalysisResult(
     status=AgentAnalysisStatus.SUCCESS,
     analysis_text='Uptrend.', trend_assessment='Up.', structure_assessment='Clean.', setup_assessment='Good.',
     uncertainty='LOW', trend_direction='UP', trend_quality='STRONG', structure_quality='CLEAN',
-    setup_quality='TEXTBOOK', context_risk='LOW', timestamp=now, error_message=None,
+    setup_quality='TEXTBOOK', context_risk='LOW',
+    proposal_has_proposal=False, proposal_direction=None, proposal_entry=None,
+    proposal_stop=None, proposal_target=None, model='claude-sonnet-5',
+    timestamp=now, error_message=None,
 )
 params = TradeParams(direction='long', entry=1.0950, stop=1.0900, target=1.1050)
 evaluation = evaluate(analysis, params)

@@ -270,6 +270,10 @@ def _skipped_agent_result(reason: str) -> AgentAnalysisResult:
         proposal_entry=None,
         proposal_stop=None,
         proposal_target=None,
+        # No real call was ever attempted -- this stage was skipped
+        # entirely, never even reached the point of knowing which model
+        # it would have used.
+        model=None,
         timestamp=None,
         error_message=reason,
     )
@@ -358,6 +362,8 @@ def _forced_agent_result(force_scenario: str) -> AgentAnalysisResult:
             proposal_entry=None,
             proposal_stop=None,
             proposal_target=None,
+            # No Claude request was made -- see the message below.
+            model=None,
             timestamp=None,
             error_message=(
                 f"TESTING: agent deliberately forced to fail (force_scenario={force_scenario!r}) "
@@ -389,6 +395,9 @@ def _forced_agent_result(force_scenario: str) -> AgentAnalysisResult:
         proposal_entry=None,
         proposal_stop=None,
         proposal_target=None,
+        # A synthetic profile, never a real Claude call -- see the note
+        # above.
+        model=None,
         timestamp=datetime.now(timezone.utc),
         error_message=None,
     )
@@ -783,11 +792,15 @@ def run_pipeline(
                 structure_quality=agent_result.structure_quality,
                 setup_quality=agent_result.setup_quality,
                 context_risk=agent_result.context_risk,
+                model=agent_result.model,
             )
             proposal_summary = _persist_agent_proposal(session, run_id, agent_result)
         else:
             crud.add_failed_agent_analysis(
-                session, run_id=run_id, error_message=agent_result.error_message
+                session,
+                run_id=run_id,
+                error_message=agent_result.error_message,
+                model=agent_result.model,
             )
             proposal_summary = None
         finished_message = _agent_summary(agent_result)
@@ -805,7 +818,10 @@ def run_pipeline(
             "before the agent is called."
         )
         crud.add_failed_agent_analysis(
-            session, run_id=run_id, error_message=agent_result.error_message
+            session,
+            run_id=run_id,
+            error_message=agent_result.error_message,
+            model=agent_result.model,
         )
         crud.add_audit_event(
             session,
@@ -844,10 +860,14 @@ def run_pipeline(
                     visible_timeframe=confirmation_agent_result.visible_timeframe,
                     trend_direction=confirmation_agent_result.trend_direction,
                     trend_quality=confirmation_agent_result.trend_quality,
+                    model=confirmation_agent_result.model,
                 )
             else:
                 crud.add_failed_confirmation_analysis(
-                    session, run_id=run_id, error_message=confirmation_agent_result.error_message
+                    session,
+                    run_id=run_id,
+                    error_message=confirmation_agent_result.error_message,
+                    model=confirmation_agent_result.model,
                 )
             crud.add_audit_event(
                 session,
@@ -861,13 +881,18 @@ def run_pipeline(
                 visible_timeframe=None,
                 trend_direction=None,
                 trend_quality=None,
+                # Never even reached the point of calling analyze_confirmation().
+                model=None,
                 timestamp=None,
                 error_message=(
                     "Confirmation analysis skipped -- confirmation capture did not succeed."
                 ),
             )
             crud.add_failed_confirmation_analysis(
-                session, run_id=run_id, error_message=confirmation_agent_result.error_message
+                session,
+                run_id=run_id,
+                error_message=confirmation_agent_result.error_message,
+                model=confirmation_agent_result.model,
             )
             crud.add_audit_event(
                 session,

@@ -93,10 +93,29 @@ duplicates: [docs/architecture.md](architecture.md),
     addendum): same `1h`/`4h` readable-path DEMO fixtures, same trade
     params, no code changes between runs; `trend_quality` and
     `total_score` still varied.
+- **7A Iteration 3 (repeatability harness) is complete, tagged
+  `7a-iteration-3`.** Renumbered from the original plan (was Iteration
+  4) — see "The 7A plan" below for why. `tools/repeatability_harness.py`
+  runs the pipeline N times against a fixed DEMO fixture and reports how
+  much the output moved; a `model` column was added to
+  `agent_analyses`/`confirmation_analyses` (migrated on the live dev DB
+  with Iteration 2's exact treatment — backup, raw `ALTER TABLE`,
+  backfill NULL, all 9 evidence runs re-verified intact before proceeding
+  further). Three real n=10 batches are committed in `measurements/`:
+  `stability`/no-levels, `stability`/levels (reproduces Iteration 2's
+  55/45 split at 2x the sample, plus a new 35), and `proposals`/levels
+  (**9/10 runs proposed, ratios clustering tightly around the supplied
+  RR=2.0 — mean ≈2.02, two exact matches**). That clustering result is
+  the condition the design set for approving a no-levels control batch
+  on the `proposals` fixture — **not run yet, awaiting explicit
+  go-ahead**. Full build log, all three batches' numbers, and the
+  scope-limit disclaimer in the `## 7A Iteration 3` entry in
+  [docs/iterations.md](iterations.md).
 - **Test counts:** 292 backend + 44 frontend at the end of Iteration 1
-  (`a7c085c`). **351 backend + 52 frontend as of Iteration 2**
-  (`7a-iteration-2`) — the full per-file breakdown is in
-  [docs/iterations.md](iterations.md)'s Iteration 2 entry.
+  (`a7c085c`). 351 backend + 52 frontend as of Iteration 2
+  (`7a-iteration-2`). **370 backend + 52 frontend as of Iteration 3**
+  (`7a-iteration-3`) — the full per-file breakdown is in
+  [docs/iterations.md](iterations.md)'s respective entries.
 - **Alpha Vantage's free-tier daily quota (25 requests) was exhausted
   during Iteration 1's live verification** and its status is still
   unknown — no visibility into the exact remaining count or reset time
@@ -109,11 +128,22 @@ duplicates: [docs/architecture.md](architecture.md),
 
 ## 2. The 7A plan
 
-Four iterations, in order, agreed before any 7A code was written. **Do
-not start iteration N+1 without an explicit go-ahead**, exactly the same
-"one milestone at a time" rule 6C ran under (see "Working agreement"
-below) — it applies to 7A iterations the same way it applied to 6C
-milestones.
+Four iterations, agreed before any 7A code was written. **Do not start
+iteration N+1 without an explicit go-ahead**, exactly the same "one
+milestone at a time" rule 6C ran under (see "Working agreement" below) —
+it applies to 7A iterations the same way it applied to 6C milestones.
+
+**Iterations 3 and 4 were swapped from the original order**, at the
+start of Iteration 3's own build. The original plan had Iteration 3 =
+economic calendar, Iteration 4 = repeatability harness ("if time"). But
+Iteration 2's own addendum had, by the time Iteration 3 started, already
+turned the harness from a nice-to-have into the direct, concrete
+follow-up to a real finding on record: identical DEMO input producing a
+4:1 split on `trend_quality` (and a 45/55 split on `total_score`),
+measured by hand on n=5. Making that reproducible and cheap to re-run at
+a larger n was worth doing before economic calendar, which has no
+finding motivating it yet. Economic calendar is unaffected otherwise —
+same scope, just moved to Iteration 4.
 
 1. **Iteration 1 — agent-proposed trade levels, never self-scored.** The
    agent proposes an entry/stop/target/direction: an *alternative* when
@@ -222,23 +252,33 @@ milestones.
    live market conditions. Full reasoning in
    [docs/iterations.md](iterations.md)'s Iteration 2 addendum, "The
    fixture decision."
-3. **Iteration 3 — economic calendar tool + event-proximity block.**
-   Wires up `tools/economic_calendar.py` — scaffolded since the early
-   milestones, mentioned in [docs/architecture.md](architecture.md) as
-   "contextual input for later," never actually called by anything — into
-   a new guardrail that blocks or forces review near a scheduled event.
-   Not yet designed.
-4. **Iteration 4 (if time) — eval harness measuring agent reproducibility
-   across repeated runs on a golden set.** Not yet designed. Has a
-   concrete motivating question now, from real live-run evidence: does
-   proposed RR cluster on the user-supplied value when one is present,
-   across many repeated runs on the same chart? See "An empirical
-   observation: proposed RR varies with what the agent was shown" in
-   [docs/iterations.md](iterations.md)'s Iteration 1 addendum —
-   `ed4e50b2...`'s proposal matched the user's own `RR=2.0` on different
-   numbers, `cd25a285...`'s (no user levels) came out to `RR≈1.83`.
-   `n=2` settles nothing; this is the question a golden-set harness
-   would actually answer.
+3. **Iteration 3 — repeatability harness.** (Renumbered from the
+   original plan's Iteration 4 — see the swap note above.)
+   `tools/repeatability_harness.py`: a standalone CLI that runs the
+   existing pipeline N times against a fixed DEMO fixture, with nothing
+   varied between runs, and reports how much the output moved. Answers
+   two questions: (a) categorical stability — which of the agent's fields
+   hold on identical input, which move (Iteration 2's addendum measured
+   this by hand, n=5; this makes it reproducible at any n); (b) RR
+   clustering — does the agent's proposed risk/reward land on the
+   user-supplied value when one is present, versus float freely when none
+   is (Iteration 1's addendum saw `ed4e50b2...` match a supplied `RR=2.0`
+   on different numbers, and `cd25a285...` — no user levels — come out to
+   `RR≈1.83`; `n=2` settled nothing). DEMO only by default, hard-refuses
+   LIVE without an explicit `--allow-live` flag (capped at N=5 even then)
+   to protect the Alpha Vantage quota. Complete — see the `## 7A
+   Iteration 3` entry in [docs/iterations.md](iterations.md) for the full
+   build log, the migration that added a `model` column to
+   `agent_analyses`/`confirmation_analyses`, and the batch results.
+   Tagged `7a-iteration-3`.
+4. **Iteration 4 — economic calendar tool + event-proximity block.**
+   (Renumbered from the original plan's Iteration 3 — see the swap note
+   above.) Wires up `tools/economic_calendar.py` — scaffolded since the
+   early milestones, mentioned in [docs/architecture.md](architecture.md)
+   as "contextual input for later," never actually called by anything —
+   into a new guardrail that blocks or forces review near a scheduled
+   event. Not yet designed. Not started — do not begin without an
+   explicit go-ahead.
 
 ## 3. The 7A-specific invariant
 

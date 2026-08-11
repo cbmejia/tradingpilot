@@ -274,6 +274,7 @@ def add_agent_analysis(
     structure_quality: str,
     setup_quality: str,
     context_risk: str,
+    model: Optional[str] = None,
 ) -> AgentAnalysis:
     """
     Record a SUCCESSFUL agent analysis -- including the five categorical
@@ -287,6 +288,13 @@ def add_agent_analysis(
     before anything is written -- see _validate_categorical_fields()
     above for why this check exists here too, not just as the CHECK
     constraint on AgentAnalysis.
+
+    model (7A Iteration 3): the Claude model id this call used. Optional
+    at this layer (unlike the required dataclass field it's read from --
+    see AgentAnalysisResult.model) because NULL is a legitimate,
+    meaningful value here: it's what every pre-Iteration-3 row already
+    has, and what a caller that genuinely doesn't know the model should
+    store rather than guess.
 
     For a failed analysis, see add_failed_agent_analysis() below --
     status is always "SUCCESS" here, never a parameter, so this function
@@ -313,6 +321,7 @@ def add_agent_analysis(
         structure_quality=structure_quality,
         setup_quality=setup_quality,
         context_risk=context_risk,
+        model=model,
     )
     session.add(analysis)
     session.commit()
@@ -325,6 +334,7 @@ def add_failed_agent_analysis(
     *,
     run_id: str,
     error_message: str,
+    model: Optional[str] = None,
 ) -> AgentAnalysis:
     """
     Record a FAILED agent analysis -- e.g. Claude's response was
@@ -333,6 +343,11 @@ def add_failed_agent_analysis(
     null; nothing here is guessed or filled in. Milestone 10.5 fix: the
     reason this function exists is so a failure has somewhere real to
     live besides the audit_events text trail.
+
+    model (7A Iteration 3): the model this attempt was configured to
+    call, even though it failed -- knowing which model failed is real
+    diagnostic information (see AgentAnalysisResult.model's docstring).
+    None when no real call was ever attempted at all.
     """
     analysis = AgentAnalysis(
         run_id=run_id,
@@ -348,6 +363,7 @@ def add_failed_agent_analysis(
         setup_quality=None,
         context_risk=None,
         error_message=error_message,
+        model=model,
     )
     session.add(analysis)
     session.commit()
@@ -597,12 +613,16 @@ def add_confirmation_analysis(
     visible_timeframe: str,
     trend_direction: str,
     trend_quality: str,
+    model: Optional[str] = None,
 ) -> ConfirmationAnalysis:
     """
     Record a SUCCESSFUL confirmation analysis (7A Iteration 2) -- status
     is always "SUCCESS" here, never a parameter, the same pattern
     add_agent_analysis() already uses. For a failed confirmation, see
     add_failed_confirmation_analysis() below.
+
+    model (7A Iteration 3): same optional-with-NULL-default reasoning as
+    add_agent_analysis()'s own model parameter.
     """
     _validate_confirmation_categorical_fields(trend_direction, trend_quality)
     analysis = ConfirmationAnalysis(
@@ -611,6 +631,7 @@ def add_confirmation_analysis(
         visible_timeframe=visible_timeframe,
         trend_direction=trend_direction,
         trend_quality=trend_quality,
+        model=model,
     )
     session.add(analysis)
     session.commit()
@@ -623,6 +644,7 @@ def add_failed_confirmation_analysis(
     *,
     run_id: str,
     error_message: str,
+    model: Optional[str] = None,
 ) -> ConfirmationAnalysis:
     """
     Record a FAILED confirmation analysis -- the confirmation capture
@@ -630,6 +652,9 @@ def add_failed_confirmation_analysis(
     rejected. Every qualitative field is null, never a fabricated
     placeholder, the same pattern add_failed_agent_analysis() already
     uses.
+
+    model (7A Iteration 3): the model this attempt was configured to
+    call, even though it failed. None when no real call was attempted.
     """
     analysis = ConfirmationAnalysis(
         run_id=run_id,
@@ -638,6 +663,7 @@ def add_failed_confirmation_analysis(
         trend_direction=None,
         trend_quality=None,
         error_message=error_message,
+        model=model,
     )
     session.add(analysis)
     session.commit()

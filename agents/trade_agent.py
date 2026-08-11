@@ -212,6 +212,17 @@ class AgentAnalysisResult:
     those two shapes exactly, so this dataclass can never end up
     half-populated. All five are None when status is FAILED, same as
     every other qualitative field.
+
+    model (7A Iteration 3) is the Claude model id this attempt was
+    configured to call -- set on every real call attempt, success OR
+    failure (unlike the qualitative fields, which are only known once
+    Claude actually responds), because knowing *which model* failed is
+    real diagnostic information (see the truncation-fix entry in
+    docs/iterations.md, diagnosed via stop_reason on a real response).
+    None only when no real call was ever attempted at all: an upstream
+    stage failed first (orchestrator's _skipped_agent_result) or this is
+    a synthetic testing result (orchestrator's _forced_agent_result) --
+    never a guess standing in for "we don't know."
     """
 
     status: AgentAnalysisStatus
@@ -230,6 +241,7 @@ class AgentAnalysisResult:
     proposal_entry: Optional[float]
     proposal_stop: Optional[float]
     proposal_target: Optional[float]
+    model: Optional[str]  # 7A Iteration 3 -- the Claude model id, see docstring above
     timestamp: Optional[datetime]
     error_message: Optional[str] = None
 
@@ -256,12 +268,16 @@ class ConfirmationAnalysisResult:
     evals/trade_evaluator.py -- only by the CROSS_TIMEFRAME_AGREEMENT
     guardrail, which backend/orchestrator.py derives deterministically
     from these two fields; the agent never states "agreement" itself.
+
+    model (7A Iteration 3): same meaning and same None-only-when-no-real-
+    call-was-attempted rule as AgentAnalysisResult.model above.
     """
 
     status: ConfirmationAnalysisStatus
     visible_timeframe: Optional[str]
     trend_direction: Optional[str]  # "UP" | "DOWN" | "SIDEWAYS" | "UNCLEAR"
     trend_quality: Optional[str]  # "STRONG" | "MODERATE" | "WEAK" | "UNCLEAR"
+    model: Optional[str]  # 7A Iteration 3 -- the Claude model id
     timestamp: Optional[datetime]
     error_message: Optional[str] = None
 
@@ -721,6 +737,7 @@ class TradeAgent:
             proposal_entry=parsed["proposal_entry"],
             proposal_stop=parsed["proposal_stop"],
             proposal_target=parsed["proposal_target"],
+            model=self._model,
             timestamp=datetime.now(timezone.utc),
             error_message=None,
         )
@@ -743,6 +760,10 @@ class TradeAgent:
             proposal_entry=None,
             proposal_stop=None,
             proposal_target=None,
+            # self._model is known even on failure (it's resolved in
+            # __init__, before any call is attempted) -- recorded here on
+            # purpose, see the dataclass docstring.
+            model=self._model,
             timestamp=None,
             error_message=message,
         )
@@ -841,6 +862,7 @@ class TradeAgent:
             visible_timeframe=parsed[CONFIRMATION_VISIBLE_TIMEFRAME_FIELD],
             trend_direction=parsed[CONFIRMATION_TREND_DIRECTION_FIELD],
             trend_quality=parsed[CONFIRMATION_TREND_QUALITY_FIELD],
+            model=self._model,
             timestamp=datetime.now(timezone.utc),
             error_message=None,
         )
@@ -851,6 +873,8 @@ class TradeAgent:
             visible_timeframe=None,
             trend_direction=None,
             trend_quality=None,
+            # Same reasoning as _failed() above: known even on failure.
+            model=self._model,
             timestamp=None,
             error_message=message,
         )

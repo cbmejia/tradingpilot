@@ -36,6 +36,7 @@ def _analysis(**overrides) -> AgentAnalysisResult:
         proposal_entry=None,
         proposal_stop=None,
         proposal_target=None,
+        model="claude-sonnet-5",
         timestamp=datetime.now(timezone.utc),
         error_message=None,
     )
@@ -341,6 +342,7 @@ def test_failed_agent_analysis_returns_failed_evaluation_without_scoring():
         proposal_entry=None,
         proposal_stop=None,
         proposal_target=None,
+        model=None,
         timestamp=None,
         error_message="No chart to analyze -- capture status is FAILED.",
     )
