@@ -3286,6 +3286,80 @@ the 30 new harness-batch runs (10×3, each carrying its own
 `repeatability_harness_run` audit event) live only in the local dev
 database, not in git history.
 
+## 7A Iteration 3 addendum — the control batch, and what it actually shows
+
+Batch 3's clustering result (9/10 proposals, ratios tight around the
+supplied `RR=2.0`) met the exact criterion set for approving a follow-up:
+run the same `proposals` fixture with no user levels at all, and see
+whether the ratio still lands near 2.0 or spreads out once there's
+nothing to track. Approved and run: `proposals` / no levels, n=10, DEMO,
+`claude-sonnet-5` — committed as
+`measurements/proposals_none_20260811T021939Z.json`.
+
+**Before running it: `.env` and the stray process, checked directly, not
+assumed.** `.env` was already `CAPTURE_MODE=demo`/`MARKET_DATA_MODE=demo`
+(set at the end of the main Iteration 3 entry above). The uvicorn
+process flagged in that entry (`backend.main:app --reload --port 8000`,
+running with a stale in-memory LIVE config from before that `.env` fix)
+was checked directly — `Get-CimInstance`/`netstat` found no uvicorn or
+`backend.main` process running and no listener on port 8000. It had
+already exited on its own sometime between that entry being written and
+this one; nothing needed to be killed. Confirmed, not assumed, before the
+control batch ran.
+
+### The comparison
+
+| | Batch 3 (`proposals`/levels, supplied RR=2.0) | Control (`proposals`/no levels) |
+|---|---|---|
+| Proposed | 9/10 | 5/10 |
+| Ratios | `2.14, 2.00, 2.07, 2.20, 2.00, 2.22, 1.82, 2.17, 1.83` | `2.00, 2.20, 2.08, 2.00, 1.83` |
+| Mean | **2.050** | **2.022** |
+| Min / Max | 1.82 / 2.22 | 1.83 / 2.20 |
+| Spread | 0.402 | 0.367 |
+| Std. dev. | 0.141 | 0.119 |
+
+**What this isolates, exactly as the control was designed to isolate
+it: the ratio value does not track the supplied number.** If the agent
+were anchoring on the specific `RR=2.0` it was shown, removing that
+number entirely should have widened the spread or shifted the center
+once there was nothing to anchor to. It didn't — the control's mean
+(2.022) sits inside batch 3's own spread, the two ranges almost exactly
+overlap (1.82–2.22 vs. 1.83–2.20), and the control's spread (0.367) is
+if anything *tighter* than batch 3's own (0.402). Two independent n=10
+batches on the same chart, one with a supplied number and one with none,
+produced statistically indistinguishable ratio distributions.
+
+**What the control does NOT rule out, and is a separate effect from the
+ratio value: whether a proposal happens at all.** 9/10 proposed with
+levels supplied, versus 5/10 with none — a real, substantial difference
+in *proposal rate*, not touched by the ratio comparison above. Seeing an
+example trade may make the agent more likely to also offer its own
+alternative, independent of what that alternative's numbers end up
+being. This entry does not claim to have isolated that effect — it would
+need its own comparison (proposal rate across many more paired batches)
+to say anything with confidence beyond "9/10 vs. 5/10 on one n=10 pair
+each, which could itself be noise."
+
+**Reading the two findings together, updating Iteration 1's addendum
+directly:** that entry left two readings open — anchoring on the
+supplied levels, or independently seeking the top of the risk/reward
+band (`RR≈2.0` as a general "good trade" heuristic) regardless of
+context. This control weakens the first reading and supports the
+second: the ratio clusters near 2.0 whether or not a `2.0` was ever
+shown to the model. Still only two n=10 batches on one chart, one model,
+one day — not enough to call this settled, and the scope-limit
+disclaimer on both batches' own output says exactly that — but it is a
+sharper, more specific finding than "proposed RR varies with what the
+agent was shown," and it was produced by the harness this iteration
+built specifically to make that kind of follow-up cheap.
+
+### Updated file and test counts
+
+No code changes in this addendum — the harness ran exactly as built.
+File count: **4 committed batches** in `measurements/` (the 3 from the
+main entry plus this control). Test counts unchanged (370 backend, 52
+frontend) — this addendum is a measurement, not a code change.
+
 ## Roadmap
 
 1. ~~Architecture~~

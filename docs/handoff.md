@@ -105,11 +105,18 @@ duplicates: [docs/architecture.md](architecture.md),
   `stability`/no-levels, `stability`/levels (reproduces Iteration 2's
   55/45 split at 2x the sample, plus a new 35), and `proposals`/levels
   (**9/10 runs proposed, ratios clustering tightly around the supplied
-  RR=2.0 — mean ≈2.02, two exact matches**). That clustering result is
-  the condition the design set for approving a no-levels control batch
-  on the `proposals` fixture — **not run yet, awaiting explicit
-  go-ahead**. Full build log, all three batches' numbers, and the
-  scope-limit disclaimer in the `## 7A Iteration 3` entry in
+  RR=2.0 — mean ≈2.02, two exact matches**). That clustering result met
+  the condition set for a no-levels control batch on the `proposals`
+  fixture — **run in the Iteration 3 addendum**: 5/10 proposed, mean
+  ≈2.02, range 1.83–2.20, statistically indistinguishable from batch 3's
+  own distribution. The ratio does not track the supplied number — it
+  clusters near 2.0 whether or not a 2.0 was ever shown, weakening the
+  "anchoring" reading from Iteration 1's addendum and supporting
+  "independently seeking ~2.0 as a general good-trade heuristic" instead.
+  Proposal *rate* did differ (9/10 vs. 5/10) — a separate, not-yet-
+  isolated effect, not claimed as settled. Full build log, all four
+  batches' numbers, and the scope-limit disclaimer in the `## 7A
+  Iteration 3` entry and its addendum in
   [docs/iterations.md](iterations.md).
 - **Test counts:** 292 backend + 44 frontend at the end of Iteration 1
   (`a7c085c`). 351 backend + 52 frontend as of Iteration 2
